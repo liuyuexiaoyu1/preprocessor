@@ -18,6 +18,36 @@ Modifications in this fork
 - Use custom [remap](https://github.com/ReplayMod/remap) fork: https://github.com/Fallen-Breath/remap
   - Less useless warning messages
   - Disable message logging of remap's kotlin compiler message collector by default. You can re-enable that by setting `preprocess { enableRemapMessageCollector = true }`
+- Gradle 9 configuration cache compatibility
+  - Task fields no longer hold a `Configuration` or a `Project`, both of which made the configuration cache fail while storing the task state
+- Add a `//#import` directive for version-conditional imports ([#18](https://github.com/ReplayMod/preprocessor/issues/18))
+  ```java
+  //#if MC >= 12001
+  //$$ return entity.getPortalCooldown();
+  //#else
+  //#import com.example.mixin.EntityAccessor;
+  return ((EntityAccessor) entity).getPortalCooldown();
+  //#endif
+  ```
+  Imports of active branches are merged into the import section of the processed file (skipping ones it already has). The directive is only valid inside a conditional block, an isolated `//#import` is reported as an error.
+- Be strict about `//#else` ([#13](https://github.com/ReplayMod/preprocessor/issues/13))
+  - Content after `//#else` (such as the `//#elseif` typo `//#else#if MC>=12000`) is rejected, and so is a second `//#else` for the same `//#if`
+- Allow declaring the preprocess graph in `settings.gradle(.kts)` ([#26](https://github.com/ReplayMod/preprocessor/issues/26))
+  ```kotlin
+  // settings.gradle.kts
+  plugins { id("com.replaymod.preprocess") version "<version>" }
+
+  preprocess {
+      val mc11802 = createNode("1.18.2", 1_18_02, "")
+      val mc11900 = createNode("1.19", 1_19_00, "")
+      mc11900.link(mc11802, null)
+      for (node in getNodes()) {
+          include(":${node.project}")
+          project(":${node.project}").apply { projectDir = file("versions/${node.project}") }
+      }
+  }
+  ```
+  The graph is shared with the projects, so an existing `build.gradle(.kts)` setup keeps working unchanged.
 
 ### The Preprocessor
 To support multiple Minecraft versions with the ReplayMod, a [JCP](https://github.com/raydac/java-comment-preprocessor)-inspired preprocessor is used:
