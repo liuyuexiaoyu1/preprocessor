@@ -89,9 +89,6 @@ open class PreprocessTask @Inject constructor(
     @Internal
     var entries: MutableList<InOut> = mutableListOf()
 
-    @Internal
-    val proj = project
-
     @InputFiles
     @SkipWhenEmpty
     @PathSensitive(PathSensitivity.RELATIVE)
