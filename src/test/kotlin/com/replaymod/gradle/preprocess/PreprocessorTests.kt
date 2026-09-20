@@ -8,11 +8,11 @@ import io.kotest.matchers.shouldBe
 
 class PreprocessorTests : FunSpec({
     val vars = mapOf(
-            "zero" to 0,
-            "one" to 1,
-            "two" to 2,
-            "t" to 1,
-            "f" to 0
+        "zero" to 0,
+        "one" to 1,
+        "two" to 2,
+        "t" to 1,
+        "f" to 0
     )
     with(CommentPreprocessor(vars)) {
         context("evalExpr") {
@@ -110,10 +110,10 @@ class PreprocessorTests : FunSpec({
         }
         context("convertSource") {
             fun String.convert() = convertSource(
-                    PreprocessTask.DEFAULT_KEYWORDS,
-                    lines(),
-                    lines().map { it to emptyList() },
-                    "test.java"
+                PreprocessTask.DEFAULT_KEYWORDS,
+                lines(),
+                lines().map { it to emptyList() },
+                "test.java"
             ).joinToString("\n")
 
             test("throws on unexpected endif") {
@@ -158,54 +158,260 @@ class PreprocessorTests : FunSpec({
                     //#endif
                 """.convert()
             }
-            test("adds imports of active branches only") {
+            test("swapwhen rewrites the line when the condition holds") {
                 val out = """
                     package com.example;
-                    //#if t
-                    //#import com.example.a.A;
-                    //#else
-                    //#import com.example.b.B;
-                    //#endif
+                    import com.example.a.Old; //#swapwhen t com.example.b.New
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("import com.example.b.New;") shouldBe true
+            }
+            test("swapwhen keeps the line and drops the directive otherwise") {
+                val out = """
+                    package com.example;
+                    import com.example.a.Old; //#swapwhen f com.example.b.New
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
-                outLines.contains("import com.example.a.A;") shouldBe true
-                outLines.contains("import com.example.b.B;") shouldBe false
-                (outLines.indexOf("import com.example.a.A;") < outLines.indexOf("class C {}")) shouldBe true
+                outLines.contains("import com.example.a.Old;") shouldBe true
+                outLines.none { it.contains("swapwhen") } shouldBe true
             }
-            test("does not duplicate imports already present") {
+            test("swapwhen also applies to code lines") {
+                val out = "class C {\n    int x = 1; //#swapwhen t int x = 2;\n}".convert()
+                out.lines().map { it.trim() }.contains("int x = 2;") shouldBe true
+            }
+            test("inline case replaces the code it follows when the condition holds") {
+                val out = "class C {\n    int x = /*#case*/1/*?t ? 2*/;\n}".convert()
+                out.lines().map { it.trim() }.contains("int x = 2;") shouldBe true
+            }
+            test("inline case keeps the code as written and drops the directive otherwise") {
+                val out = "class C {\n    int x = /*#case*/1/*?f ? 2*/;\n}".convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("int x = 1;") shouldBe true
+                outLines.none { it.contains("#swap") || it.contains("#when") } shouldBe true
+            }
+            test("inline case applies to import statements") {
                 val out = """
                     package com.example;
-                    import com.example.a.A;
-                    //#if t
-                    //#import com.example.a.A;
-                    //#endif
+                    import com.example.a./*#case*/Old/*?t ? New*/;
                     class C {}
                 """.convert()
-                out.lines().count { it.trim() == "import com.example.a.A;" } shouldBe 1
+                out.lines().map { it.trim() }.contains("import com.example.a.New;") shouldBe true
             }
-            test("imports go to the top when there is no package") {
+            test("inline case takes the first condition that holds") {
+                val out = "class C {\n    int x = /*#case*/1/*?one ? 2*//*?two ? 3*/;\n}".convert()
+                out.lines().map { it.trim() }.contains("int x = 2;") shouldBe true
+            }
+            test("inline case with descending conditions picks the newest one that holds") {
                 val out = """
-                    //#if t
-                    //#import com.example.a.A;
-                    //#endif
-                    class C {}
+                    class C {
+                        int x = /*#case*/0/*?two >= 2 ? 3*//*?two >= 1 ? 2*//*?one >= 1 ? 1*/;
+                    }
                 """.convert()
-                out.lines().first() shouldBe "import com.example.a.A;"
+                out.lines().map { it.trim() }.contains("int x = 3;") shouldBe true
             }
-            test("throws on import outside of a conditional block") {
-                shouldThrow<CommentPreprocessor.ParserException> { "//#import com.example.a.A;".convert() }
+            test("inline case falls through to a lower condition when a higher one fails") {
+                val out = """
+                    class C {
+                        int x = /*#case*/0/*?two >= 3 ? 3*//*?one >= 1 ? 1*/;
+                    }
+                """.convert()
+                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+            }
+            test("inline case keeps the baseline when no condition holds") {
+                val out = """
+                    class C {
+                        int x = /*#case*/0/*?two >= 3 ? 3*//*?two >= 4 ? 4*/;
+                    }
+                """.convert()
+                out.lines().map { it.trim() }.contains("int x = 0;") shouldBe true
+            }
+            test("inline case does not evaluate conditions that follow the winner") {
+                val out = "class C {\n    int x = /*#case*/1/*?t ? 2*//*?bogus >= 1 ? 3*/;\n}".convert()
+                out.lines().map { it.trim() }.contains("int x = 2;") shouldBe true
+            }
+            test("throws on an unusable condition in an inline case") {
                 shouldThrow<CommentPreprocessor.ParserException> {
-                    "class C {}\n//#import com.example.a.A;".convert()
+                    "class C {\n    int x = /*#case*/1/*?bogus >= 1 ? 2*/;\n}".convert()
                 }
             }
-            test("throws on empty import target") {
-                shouldThrow<CommentPreprocessor.ParserException> { "//#if t\n//#import\n//#endif".convert() }
+            test("several inline cases may share one line") {
+                val out = "class C {\n    int x = /*#case*/1/*?t ? 2*/ + /*#case*/3/*?f ? 4*/;\n}".convert()
+                out.lines().map { it.trim() }.contains("int x = 2 + 3;") shouldBe true
             }
-            test("import directive is not mistaken for if") {
-                // If `//#import` were parsed as `//#if` with `com.example.a.A;` as its condition, this would throw.
-                val out = "//#if t\n//#import com.example.a.A;\n//#endif".convert()
-                out.lines().map { it.trim() }.contains("import com.example.a.A;") shouldBe true
+            test("inline case keeps whitespace around the code it replaces") {
+                val out = "class C {\n    register(/*#case*/ Old.class /*?t ? New.class */);\n}".convert()
+                out.lines().map { it.trim() }.contains("register( New.class );") shouldBe true
+            }
+            test("inline case is ignored inside an inactive branch") {
+                val out = """
+                    class C {
+                        //#if f
+                        int x = /*#case*/1/*?t ? 2*/;
+                        //#endif
+                    }
+                """.convert()
+                out.lines().any { it.contains("#case") } shouldBe true
+            }
+            test("throws on an inline case marker without a branch block") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "class C {\n    int x = /*#case*/1;\n}".convert()
+                }
+            }
+            test("throws on an inline branch without a condition separator") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "class C {\n    int x = /*#case*/1/*?t 2*/;\n}".convert()
+                }
+            }
+            test("case branch becomes code when its condition holds") {
+                val out = """
+                    //#case
+                    //?t codeA();
+                    //?f codeB();
+                    //#endcase
+                    class C {}
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("codeA();") shouldBe true
+                outLines.contains("//?f codeB();") shouldBe true
+            }
+            test("case branch stays commented when its condition fails") {
+                val out = """
+                    //#case
+                    //?f codeB();
+                    //#endcase
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("//?f codeB();") shouldBe true
+            }
+            test("uses the longest evaluable prefix as the condition") {
+                val out = """
+                    //#case
+                    //?t >= 0 codeA();
+                    //#endcase
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("codeA();") shouldBe true
+            }
+            test("throws on malformed swapwhen") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "int x = 1; //#swapwhen\nclass C {}".convert()
+                }
+            }
+            test("throws on malformed case branch") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//#case\n//?\n//#endcase\nclass C {}".convert()
+                }
+            }
+            test("throws on unusable case condition") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//#case\n//?bogus >= 1 codeA();\n//#endcase\nclass C {}".convert()
+                }
+            }
+            test("throws on a case branch outside of a case block") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//?t codeA();\nclass C {}".convert()
+                }
+            }
+            test("throws on a trailing case branch outside of a case block") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "class C {\n    int a = 1; //?t\n}".convert()
+                }
+            }
+            test("case markers survive so that a second pass still sees the group") {
+                val out = """
+                    //#case
+                    //?t codeA();
+                    //#endcase
+                    class C {}
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("//#case") shouldBe true
+                outLines.contains("//#endcase") shouldBe true
+            }
+            test("processing is idempotent") {
+                val source = """
+                    //#case
+                    //?t codeA();
+                    //?f codeB();
+                    //#endcase
+                    class C {}
+                """.convert()
+                source.convert().trimEnd() shouldBe source.trimEnd()
+            }
+            test("throws on an unterminated case block") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//#case\n//?t codeA();\nclass C {}".convert()
+                }
+            }
+            test("throws on an unexpected case end") {
+                shouldThrow<CommentPreprocessor.ParserException> { "//#endcase\nclass C {}".convert() }
+            }
+            test("throws on a nested case block") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//#case\n//#case\n//#endcase\n//#endcase\nclass C {}".convert()
+                }
+            }
+            test("multi-line block expands when its branch is active") {
+                val out = """
+                    class C {
+                        //#if t
+                        /*$$
+                        int a = 1;
+                        int b = 2;
+                        $$*/
+                        //#endif
+                    }
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("int a = 1;") shouldBe true
+                outLines.contains("int b = 2;") shouldBe true
+                outLines.none { it.startsWith("/*$$") || it.startsWith("$$*/") } shouldBe true
+            }
+            test("multi-line block stays a comment when its branch is inactive") {
+                val out = """
+                    class C {
+                        //#if f
+                        /*$$
+                        int a = 1;
+                        $$*/
+                        //#endif
+                    }
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("/*$$") shouldBe true
+                outLines.contains("$$*/") shouldBe true
+            }
+            test("throws on unterminated multi-line block") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "class C {\n/*$$\nint a = 1;\n".convert()
+                }
+            }
+            test("trailing case condition keeps the line when it holds") {
+                val out = "//#case\nclass C {\n    int a = 1; //?t\n}\n//#endcase".convert()
+                out.lines().map { it.trim() }.contains("int a = 1;") shouldBe true
+            }
+            test("trailing case condition comments the line out when it fails") {
+                val out = "//#case\nclass C {\n    int a = 1; //?f\n}\n//#endcase".convert()
+                out.lines().map { it.trim() }.any { it.startsWith("//$$") && it.contains("int a = 1;") } shouldBe true
+            }
+            test("case block mixes plain and prefixed alternatives") {
+                val out = """
+                    //#case
+                    int a = 1; //?t
+                    //?t int b = 2;
+                    //#endcase
+                    class C {}
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("int a = 1;") shouldBe true
+                outLines.contains("int b = 2;") shouldBe true
+                outLines.none { it.contains("//?") } shouldBe true
+            }
+            test("throws on trailing case condition without a condition") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//#case\nclass C {\n    int a = 1; //?\n}\n//#endcase".convert()
+                }
             }
             test("throws on missing endif") {
                 shouldThrow<CommentPreprocessor.ParserException> { "//#if t".convert() }
@@ -681,31 +887,31 @@ class PreprocessorTests : FunSpec({
             }
             test("uses mapped source for unaffected lines") {
                 convertSource(
-                        PreprocessTask.DEFAULT_KEYWORDS,
-                        listOf("//#if t", "original", "//#endif"),
-                        listOf("//#if t", "mapped", "//#endif").map { it to emptyList() },
-                        "test.java"
+                    PreprocessTask.DEFAULT_KEYWORDS,
+                    listOf("//#if t", "original", "//#endif"),
+                    listOf("//#if t", "mapped", "//#endif").map { it to emptyList() },
+                    "test.java"
                 ).shouldBe(listOf("//#if t", "mapped", "//#endif"))
             }
             test("uses original source for newly commented lines") {
                 convertSource(
-                        PreprocessTask.DEFAULT_KEYWORDS,
-                        listOf("//#if f", "original", "//#endif"),
-                        listOf("//#if f", "mapped", "//#endif").map { it to emptyList() },
-                        "test.java"
+                    PreprocessTask.DEFAULT_KEYWORDS,
+                    listOf("//#if f", "original", "//#endif"),
+                    listOf("//#if f", "mapped", "//#endif").map { it to emptyList() },
+                    "test.java"
                 ).shouldBe(listOf("//#if f", "//$$ original", "//#endif"))
             }
             test("fails when there are errors in unaffected lines") {
                 with (CommentPreprocessor(vars)) {
                     convertSource(
-                            PreprocessTask.DEFAULT_KEYWORDS,
-                            listOf("//#if t", "original", "//#endif"),
-                            listOf(
-                                    "//#if t" to emptyList(),
-                                    "mapped" to listOf("err1", "err2"),
-                                    "//#endif" to emptyList()
-                            ),
-                            "test.java"
+                        PreprocessTask.DEFAULT_KEYWORDS,
+                        listOf("//#if t", "original", "//#endif"),
+                        listOf(
+                            "//#if t" to emptyList(),
+                            "mapped" to listOf("err1", "err2"),
+                            "//#endif" to emptyList()
+                        ),
+                        "test.java"
                     )
                     fail.shouldBeTrue()
                 }
@@ -713,14 +919,14 @@ class PreprocessorTests : FunSpec({
             test("ignores errors in commented lines") {
                 with (CommentPreprocessor(vars)) {
                     convertSource(
-                            PreprocessTask.DEFAULT_KEYWORDS,
-                            listOf("//#if f", "original", "//#endif"),
-                            listOf(
-                                    "//#if f" to emptyList(),
-                                    "mapped" to listOf("err1", "err2"),
-                                    "//#endif" to emptyList()
-                            ),
-                            "test.java"
+                        PreprocessTask.DEFAULT_KEYWORDS,
+                        listOf("//#if f", "original", "//#endif"),
+                        listOf(
+                            "//#if f" to emptyList(),
+                            "mapped" to listOf("err1", "err2"),
+                            "//#endif" to emptyList()
+                        ),
+                        "test.java"
                     )
                     fail.shouldBeFalse()
                 }
