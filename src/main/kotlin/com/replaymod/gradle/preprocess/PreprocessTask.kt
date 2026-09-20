@@ -859,6 +859,9 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         var n = 0
         // Imports requested by `//#import` directives of active branches; merged into the import section at the end.
         val imports = mutableListOf<String>()
+        // Simple name -> full statement, so that two active branches importing different classes under the same
+        // simple name are reported instead of silently producing a file that cannot compile.
+        val importedSimpleNames = mutableMapOf<String, String>()
 
         fun evalCondition(condition: String): Boolean {
             if (!condition.startsWith(" "))
@@ -888,6 +891,18 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     }
                     // Both `//#import com.example.A;` and `//#import import com.example.A;` are accepted.
                     val statement = if (imported.startsWith("import ")) imported else "import $imported"
+                    val simpleName = statement.removeSuffix(";").substringAfterLast('.').trim()
+                    val previous = importedSimpleNames.put(simpleName, statement)
+                    if (previous != null && previous != statement) {
+                        // Both branches are active here, so the file would end up importing two different classes
+                        // under one name. Almost always a sign of a condition that does not match the versions the
+                        // imported class actually exists in.
+                        System.err.println(
+                            "$fileName:$n: conflicting imports for '$simpleName': " +
+                                "'${previous.removePrefix("import ").removeSuffix(";")}' and " +
+                                "'${statement.removePrefix("import ").removeSuffix(";")}'"
+                        )
+                    }
                     if (statement !in imports) {
                         imports.add(statement)
                     }
