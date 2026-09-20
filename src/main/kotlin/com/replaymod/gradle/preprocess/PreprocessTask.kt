@@ -47,7 +47,13 @@ data class Keywords(
         val elseif: String,
         val `else`: String,
         val endif: String,
-        val eval: String
+        val eval: String,
+        /**
+         * Directive for adding an import to the processed file, but only if the branch it appears in is active, e.g.
+         * `//#import com.example.mixin.EntityAccessor;`. All such imports are collected and inserted into the file's
+         * import section, so patterns can rely on them without having to spell out fully qualified names.
+         */
+        val `import`: String = "//#import",
 ) : Serializable
 
 @CacheableTask
@@ -65,7 +71,8 @@ open class PreprocessTask @Inject constructor(
                 elseif = "//#elseif",
                 `else` = "//#else",
                 endif = "//#endif",
-                eval = "//$$"
+                eval = "//$$",
+                `import` = "//#import",
         )
         @JvmStatic
         val CFG_KEYWORDS = Keywords(
@@ -76,7 +83,8 @@ open class PreprocessTask @Inject constructor(
                 elseif = "##elseif",
                 `else` = "##else",
                 endif = "##endif",
-                eval = "#$$"
+                eval = "#$$",
+                `import` = "##import",
         )
     }
 
@@ -453,7 +461,9 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                                 kws.value,
                                 lines,
                                 lines.map { Pair(it, emptyList()) },
-                                relPath
+                                relPath,
+                                // No imports in this pass: it feeds the remapper and must keep the line count stable.
+                                insertImports = false,
                         ).joinToString("\n")
                     }
                 }
@@ -830,12 +840,25 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
     private val String.indentation: String
         get() = takeWhile { it == ' ' || it == '\t' }
 
-    fun convertSource(kws: Keywords, lines: List<String>, remapped: List<Pair<String, List<String>>>, fileName: String): List<String> {
+    /**
+     * @param insertImports whether imports collected from `//#import` directives are inserted into the result.
+     *        Must be disabled for the pass which produces the input of the remapper, because that pass must not
+     *        change the number of lines: the remapped output is zipped line by line with the original file later on.
+     */
+    fun convertSource(
+            kws: Keywords,
+            lines: List<String>,
+            remapped: List<Pair<String, List<String>>>,
+            fileName: String,
+            insertImports: Boolean = true,
+    ): List<String> {
         val stack = mutableListOf<IfStackEntry>()
         val indentStack = mutableListOf<String>()
         var active = true
         var remapActive = true
         var n = 0
+        // Imports requested by `//#import` directives of active branches; merged into the import section at the end.
+        val imports = mutableListOf<String>()
 
         fun evalCondition(condition: String): Boolean {
             if (!condition.startsWith(" "))
@@ -852,7 +875,21 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             var ignoreErrors = false
             n++
             val trimmed = line.trim()
-            val mapped = if (trimmed.startsWith(kws.`if`)) {
+            val mapped = if (trimmed.startsWith(kws.`import`)) {
+                // Note: must be checked before `kws.if`, because `//#import` also starts with `//#if`.
+                if (active) {
+                    val imported = trimmed.substring(kws.`import`.length).trim()
+                    if (imported.isEmpty()) {
+                        throw ParserException("Expected import target in line $n of $fileName")
+                    }
+                    // Both `//#import com.example.A;` and `//#import import com.example.A;` are accepted.
+                    val statement = if (imported.startsWith("import ")) imported else "import $imported"
+                    if (statement !in imports) {
+                        imports.add(statement)
+                    }
+                }
+                line
+            } else if (trimmed.startsWith(kws.`if`)) {
                 val result = evalCondition(trimmed.substring(kws.`if`.length))
                 stack.push(IfStackEntry(result, n, elseFound = false, trueFound = result))
                 indentStack.push(line.indentation)
@@ -972,7 +1009,31 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             if (stack.isNotEmpty()) {
                 throw ParserException("Missing endif in line ${stack.last().lineno} of $fileName")
             }
+        }.let { if (insertImports) it.mergeImports(imports) else it }
+    }
+
+    /**
+     * Inserts [imports] at the end of the file's import section: after the last `import` line, otherwise after the
+     * `package` declaration, otherwise at the very top. Imports the processed file already contains are skipped.
+     */
+    private fun List<String>.mergeImports(imports: List<String>): List<String> {
+        if (imports.isEmpty()) {
+            return this
         }
+        val existing = map { it.trim() }.toSet()
+        val missing = imports.filterNot { it in existing }
+        if (missing.isEmpty()) {
+            return this
+        }
+        val lastImport = indexOfLast { it.trim().startsWith("import ") }
+        if (lastImport >= 0) {
+            return subList(0, lastImport + 1) + missing + subList(lastImport + 1, size)
+        }
+        val lastPackage = indexOfLast { it.trim().startsWith("package ") }
+        if (lastPackage >= 0) {
+            return subList(0, lastPackage + 1) + listOf("") + missing + subList(lastPackage + 1, size)
+        }
+        return missing + this
     }
 
     fun convertFile(kws: Keywords, inFile: File, outFile: File, remap: ((List<String>) -> List<Pair<String, List<String>>>)? = null) {

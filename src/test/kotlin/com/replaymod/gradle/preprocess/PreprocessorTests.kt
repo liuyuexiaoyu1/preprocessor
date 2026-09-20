@@ -158,6 +158,48 @@ class PreprocessorTests : FunSpec({
                     //#endif
                 """.convert()
             }
+            test("adds imports of active branches only") {
+                val out = """
+                    package com.example;
+                    //#if t
+                    //#import com.example.a.A;
+                    //#else
+                    //#import com.example.b.B;
+                    //#endif
+                    class C {}
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("import com.example.a.A;") shouldBe true
+                outLines.contains("import com.example.b.B;") shouldBe false
+                (outLines.indexOf("import com.example.a.A;") < outLines.indexOf("class C {}")) shouldBe true
+            }
+            test("does not duplicate imports already present") {
+                val out = """
+                    package com.example;
+                    import com.example.a.A;
+                    //#if t
+                    //#import com.example.a.A;
+                    //#endif
+                    class C {}
+                """.convert()
+                out.lines().count { it.trim() == "import com.example.a.A;" } shouldBe 1
+            }
+            test("imports without package go to the top") {
+                val out = """
+                    //#import com.example.a.A;
+                    class C {}
+                """.convert()
+                out.lines().first() shouldBe "import com.example.a.A;"
+            }
+            test("throws on empty import target") {
+                shouldThrow<CommentPreprocessor.ParserException> { "//#import".convert() }
+            }
+            test("import directive is not mistaken for if") {
+                // If `//#import` were parsed as `//#if`, the trailing endif below would be legal instead of unexpected.
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//#import com.example.a.A;\n//#endif".convert()
+                }
+            }
             test("throws on missing endif") {
                 shouldThrow<CommentPreprocessor.ParserException> { "//#if t".convert() }
                 shouldThrow<CommentPreprocessor.ParserException> { "//#if t\n//#if t\n//#endif".convert() }
