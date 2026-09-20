@@ -51,6 +51,8 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach 
 
 repositories {
     mavenLocal()
+    // JitPack's build machines are regularly rate limited by Maven Central (HTTP 429), so prefer a mirror.
+    maven(url = "https://maven.aliyun.com/repository/public")
     mavenCentral()
     maven(url = "https://jitpack.io")
     maven(url = "https://maven.fabricmc.net")
