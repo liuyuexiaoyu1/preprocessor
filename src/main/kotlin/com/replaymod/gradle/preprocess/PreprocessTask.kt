@@ -877,6 +877,10 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             val trimmed = line.trim()
             val mapped = if (trimmed.startsWith(kws.`import`)) {
                 // Note: must be checked before `kws.if`, because `//#import` also starts with `//#if`.
+                if (stack.isEmpty()) {
+                    // An unconditional import has no reason to be a directive, it can just be written as-is.
+                    throw ParserException("Unexpected import outside of any conditional block in line $n of $fileName")
+                }
                 if (active) {
                     val imported = trimmed.substring(kws.`import`.length).trim()
                     if (imported.isEmpty()) {

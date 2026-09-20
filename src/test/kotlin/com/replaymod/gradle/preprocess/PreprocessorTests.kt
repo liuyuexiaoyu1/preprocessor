@@ -184,21 +184,28 @@ class PreprocessorTests : FunSpec({
                 """.convert()
                 out.lines().count { it.trim() == "import com.example.a.A;" } shouldBe 1
             }
-            test("imports without package go to the top") {
+            test("imports go to the top when there is no package") {
                 val out = """
+                    //#if t
                     //#import com.example.a.A;
+                    //#endif
                     class C {}
                 """.convert()
                 out.lines().first() shouldBe "import com.example.a.A;"
             }
+            test("throws on import outside of a conditional block") {
+                shouldThrow<CommentPreprocessor.ParserException> { "//#import com.example.a.A;".convert() }
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "class C {}\n//#import com.example.a.A;".convert()
+                }
+            }
             test("throws on empty import target") {
-                shouldThrow<CommentPreprocessor.ParserException> { "//#import".convert() }
+                shouldThrow<CommentPreprocessor.ParserException> { "//#if t\n//#import\n//#endif".convert() }
             }
             test("import directive is not mistaken for if") {
-                // If `//#import` were parsed as `//#if`, the trailing endif below would be legal instead of unexpected.
-                shouldThrow<CommentPreprocessor.ParserException> {
-                    "//#import com.example.a.A;\n//#endif".convert()
-                }
+                // If `//#import` were parsed as `//#if` with `com.example.a.A;` as its condition, this would throw.
+                val out = "//#if t\n//#import com.example.a.A;\n//#endif".convert()
+                out.lines().map { it.trim() }.contains("import com.example.a.A;") shouldBe true
             }
             test("throws on missing endif") {
                 shouldThrow<CommentPreprocessor.ParserException> { "//#if t".convert() }
