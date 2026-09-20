@@ -1253,27 +1253,26 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
     }
 
     private fun splitConditionAndDirective(text: String): Pair<String, String>? {
-        var best: Pair<String, String>? = null
-        for (i in text.indices) {
-            if (i > 0 && !text[i - 1].isWhitespace()) {
-                continue
+        var i = 0
+        while (i < text.length) {
+            if (text[i] == '?') {
+                val condition = text.substring(0, i).trim()
+                val rest = text.substring(i + 1).trim()
+                if (condition.isNotEmpty() && rest.isNotEmpty()) {
+                    val accepted = try {
+                        condition.evalExpr()
+                        true
+                    } catch (e: Exception) {
+                        false
+                    }
+                    if (accepted) {
+                        return Pair(condition, rest)
+                    }
+                }
             }
-            val condition = text.substring(0, i).trim()
-            val rest = text.substring(i).trim()
-            if (condition.isEmpty() || rest.isEmpty()) {
-                continue
-            }
-            val accepted = try {
-                condition.evalExpr()
-                true
-            } catch (e: Exception) {
-                false
-            }
-            if (accepted) {
-                best = Pair(condition, rest)
-            }
+            i++
         }
-        return best
+        return null
     }
 
     fun convertFile(kws: Keywords, inFile: File, outFile: File, remap: ((List<String>) -> List<Pair<String, List<String>>>)? = null) {

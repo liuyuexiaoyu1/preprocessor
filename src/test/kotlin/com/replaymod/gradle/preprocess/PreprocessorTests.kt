@@ -210,7 +210,7 @@ class PreprocessorTests : FunSpec({
             test("swapwhen rewrites the line when the condition holds") {
                 val out = """
                     package com.example;
-                    import com.example.a.Old; //#swapwhen t com.example.b.New
+                    import com.example.a.Old; //#swapwhen t ? com.example.b.New
                     class C {}
                 """.convert()
                 out.lines().map { it.trim() }.contains("import com.example.b.New;") shouldBe true
@@ -218,7 +218,7 @@ class PreprocessorTests : FunSpec({
             test("swapwhen keeps the line and drops the directive otherwise") {
                 val out = """
                     package com.example;
-                    import com.example.a.Old; //#swapwhen f com.example.b.New
+                    import com.example.a.Old; //#swapwhen f ? com.example.b.New
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
@@ -226,8 +226,25 @@ class PreprocessorTests : FunSpec({
                 outLines.none { it.contains("swapwhen") } shouldBe true
             }
             test("swapwhen also applies to code lines") {
-                val out = "class C {\n    int x = 1; //#swapwhen t int x = 2;\n}".convert()
+                val out = "class C {\n    int x = 1; //#swapwhen t ? int x = 2;\n}".convert()
                 out.lines().map { it.trim() }.contains("int x = 2;") shouldBe true
+            }
+            test("swapwhen works when the condition contains spaces and the code contains spaces") {
+                val out = """
+                    class C {
+                        return true; //#swapwhen two >= 2 ? return BlockPos.TraversalNodeStatus.ACCEPT;
+                    }
+                """.convert()
+                out.lines().map { it.trim() }.contains("return BlockPos.TraversalNodeStatus.ACCEPT;") shouldBe true
+            }
+            test("swapwhen skips an explicit separator that sits inside a ternary operator") {
+                val out = "class C {\n    return true; //#swapwhen t ? return a ? b : c;\n}".convert()
+                out.lines().map { it.trim() }.contains("return a ? b : c;") shouldBe true
+            }
+            test("throws on swapwhen without the ? separator") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "class C {\n    int x = 1; //#swapwhen t int x = 2;\n}".convert()
+                }
             }
             test("inline case replaces the code it follows when the condition holds") {
                 val out = "class C {\n    int x = /*#case*/1/*?t ? 2*/;\n}".convert()
@@ -310,29 +327,29 @@ class PreprocessorTests : FunSpec({
             test("case branch becomes code when its condition holds") {
                 val out = """
                     //#case
-                    //?t codeA();
-                    //?f codeB();
+                    //?t ? codeA();
+                    //?f ? codeB();
                     //#endcase
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
                 outLines.contains("codeA();") shouldBe true
-                outLines.contains("//?f codeB();") shouldBe true
+                outLines.contains("//?f ? codeB();") shouldBe true
             }
             test("throws when no branch in a case group matches") {
                 shouldThrow<CommentPreprocessor.ParserException> {
                     """
                         //#case
-                        //?f codeB();
+                        //?f ? codeB();
                         //#endcase
                         class C {}
                     """.convert()
                 }
             }
-            test("uses the longest evaluable prefix as the condition") {
+            test("case branch condition may contain spaces") {
                 val out = """
                     //#case
-                    //?t >= 0 codeA();
+                    //?two >= 1 ? codeA();
                     //#endcase
                     class C {}
                 """.convert()
@@ -348,15 +365,20 @@ class PreprocessorTests : FunSpec({
                     "//#case\n//?\n//#endcase\nclass C {}".convert()
                 }
             }
+            test("throws on missing ? separator in case branch") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//#case\n//?t codeA();\n//#endcase\nclass C {}".convert()
+                }
+            }
             test("throws on unusable case condition") {
                 shouldThrow<CommentPreprocessor.ParserException> {
-                    "//#case\n//?bogus >= 1 codeA();\n//#endcase\nclass C {}".convert()
+                    "//#case\n//?bogus >= 1 ? codeA();\n//#endcase\nclass C {}".convert()
                 }
             }
             test("case markers survive so that a second pass still sees the group") {
                 val out = """
                     //#case
-                    //?t codeA();
+                    //?t ? codeA();
                     //#endcase
                     class C {}
                 """.convert()
@@ -366,7 +388,7 @@ class PreprocessorTests : FunSpec({
             }
             test("throws on an unterminated case block") {
                 shouldThrow<CommentPreprocessor.ParserException> {
-                    "//#case\n//?t codeA();\nclass C {}".convert()
+                    "//#case\n//?t ? codeA();\nclass C {}".convert()
                 }
             }
             test("throws on an unexpected case end") {
@@ -428,25 +450,28 @@ class PreprocessorTests : FunSpec({
                 }
             }
             test("case block mixes plain and prefixed alternatives") {
-                // With "first match wins", once the trailing `//?t` on the first line has matched, the later
-                // `//?t` line is skipped and kept as-is.
                 val out = """
                     //#case
                     int a = 1; //?t
-                    //?t int b = 2;
+                    //?t ? int b = 2;
                     //#endcase
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
                 outLines.contains("int a = 1;") shouldBe true
-                outLines.contains("//?t int b = 2;") shouldBe true
+                outLines.contains("//?t ? int b = 2;") shouldBe true
                 outLines.none { it == "int b = 2;" } shouldBe true
             }
             test("standalone line-level //? acts like a single-line //#if") {
-                val out = "//?t codeA();\nclass C {}".convert()
+                val out = "//?t ? codeA();\nclass C {}".convert()
                 out.lines().map { it.trim() }.contains("codeA();") shouldBe true
-                val out2 = "//?f codeA();\nclass C {}".convert()
-                out2.lines().map { it.trim() }.contains("//?f codeA();") shouldBe true
+                val out2 = "//?f ? codeA();\nclass C {}".convert()
+                out2.lines().map { it.trim() }.contains("//?f ? codeA();") shouldBe true
+            }
+            test("standalone line-level //? without ? separator throws") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//?t codeA();\nclass C {}".convert()
+                }
             }
             test("standalone trailing //? acts like a single-line //#if") {
                 val out = "class C {\n    int a = 1; //?t\n}".convert()
@@ -459,43 +484,41 @@ class PreprocessorTests : FunSpec({
             test("only the first matching alternative in a case group is activated") {
                 val out = """
                     //#case
-                    //?t codeA();
-                    //?t codeB();
+                    //?t ? codeA();
+                    //?t ? codeB();
                     //#endcase
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
                 outLines.contains("codeA();") shouldBe true
-                outLines.contains("//?t codeB();") shouldBe true
+                outLines.contains("//?t ? codeB();") shouldBe true
                 outLines.none { it == "codeB();" } shouldBe true
             }
             test("alternatives after a match are skipped without evaluating their conditions") {
-                // Once `//?t` has matched, a later `//?bogus ...` must not be parsed: it may reference variables
-                // that only exist for a different version.
                 val out = """
                     //#case
-                    //?t codeA();
-                    //?bogus >= 1 codeB();
+                    //?t ? codeA();
+                    //?bogus >= 1 ? codeB();
                     //#endcase
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
                 outLines.contains("codeA();") shouldBe true
-                outLines.contains("//?bogus >= 1 codeB();") shouldBe true
+                outLines.contains("//?bogus >= 1 ? codeB();") shouldBe true
             }
             test("standalone //? inside an inactive //#if branch stays commented") {
                 val out = """
                     //#if f
-                    //?t codeA();
+                    //?t ? codeA();
                     //#endif
                 """.convert()
-                out.lines().map { it.trim() }.contains("//?t codeA();") shouldBe true
+                out.lines().map { it.trim() }.contains("//?t ? codeA();") shouldBe true
             }
             test("//?t at the end of a case group acts as a default branch") {
                 val out = """
                     //#case
-                    //?f codeA();
-                    //?t codeB();
+                    //?f ? codeA();
+                    //?t ? codeB();
                     //#endcase
                     class C {}
                 """.convert()
