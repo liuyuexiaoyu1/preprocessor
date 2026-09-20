@@ -45,51 +45,18 @@ data class Keywords(
     val `if`: String,
     val ifdef: String,
     val elseif: String,
+    val elif: String,
     val `else`: String,
     val endif: String,
     val eval: String,
-    /**
-     * Trailing directive which rewrites its own line when the condition holds, e.g.
-     * `import a.b.PinkPetalsBlock; //#swapwhen MC >= 12105 a.b.FlowerBedBlock`.
-     *
-     * The line as written stays real code (so IDEs can see it), the directive is a comment (so IDEs ignore it)
-     * and it never changes the number of lines. Only two versions can be described; use [caseStart] for more.
-     */
     val swapwhen: String = "//#swapwhen",
-    /** Starts a group of [`caseBranch`] alternatives; the marker itself carries no logic. */
     val caseStart: String = "//#case",
-    /** Line-level condition: when it holds the `//?<condition>` prefix is removed and the line becomes code. */
     val caseBranch: String = "//?",
-    /** Ends a group of [`caseBranch`] alternatives. */
     val caseEnd: String = "//#endcase",
-    /**
-     * Starts a multi-line commented block terminated by [blockEnd]. Lines inside such a block do not need the
-     * [eval] prefix, and while the enclosing branch is inactive the whole thing is an ordinary Java block comment
-     * (so IDEs ignore it). When the branch is active both markers are replaced by empty lines, which keeps the
-     * line count - and with it the remapper's line-for-line view - intact.
-     */
     val blockStart: String = "/*$$",
-    /** Ends a multi-line commented block started by [blockStart]. */
     val blockEnd: String = "$$*/",
-    /**
-     * Inline directive which rewrites the code written after it, e.g.
-     * `register(/*#case*/ Old.class /*?MC >= 12111 ? New.class *//*?MC >= 12110 ? Mid.class */);`.
-     *
-     * The line level counterpart of [caseStart]: the same idea of grouping mutually exclusive alternatives, but
-     * usable anywhere inside a line, so several positions of one line can be conditioned independently. The code
-     * written down (`Old.class` above) stays real code for the version the file was authored for, so IDEs resolve
-     * and highlight it, while the directive itself is an ordinary block comment and thus invisible to compilers
-     * and IDEs. The number of lines is never changed.
-     *
-     * Several `/*?[condition] ? [replacement] */` blocks may follow one marker; the first condition that holds
-     * wins, so conditions are written in descending order (newest version first) and supporting a new version
-     * means putting one more block at the front. All blocks are removed from the result. When no condition holds
-     * the code as written is kept.
-     */
     val inlineCase: String = "/*#case*/",
-    /** Starts a `[condition] ? [replacement]` block following an [inlineCase] marker. */
     val inlineBranch: String = "/*?",
-    /** Ends a block started by [inlineBranch]. */
     val inlineEnd: String = "*/",
 ) : Serializable
 
@@ -106,6 +73,7 @@ open class PreprocessTask @Inject constructor(
             `if` = "//#if",
             ifdef = "//#ifdef",
             elseif = "//#elseif",
+            elif = "//#elif",
             `else` = "//#else",
             endif = "//#endif",
             eval = "//$$",
@@ -126,6 +94,7 @@ open class PreprocessTask @Inject constructor(
             `if` = "##if",
             ifdef = "##ifdef",
             elseif = "##elseif",
+            elif = "##elif",
             `else` = "##else",
             endif = "##endif",
             eval = "#$$",
@@ -179,9 +148,8 @@ open class PreprocessTask @Inject constructor(
     @PathSensitive(PathSensitivity.NONE)
     var destinationMappings: File? = null
 
-    // Note: Requires that source and destination mappings files to be in `tiny` format.
     @Input
-    @Optional // required if source or destination mappings have more than two namespaces (optional for backwards compat)
+    @Optional
     val intermediateMappingsName = objects.property<String>()
 
     @Input
@@ -249,11 +217,7 @@ open class PreprocessTask @Inject constructor(
         val workQueue = if (compiler.isEmpty) {
             workerExecutor.noIsolation()
         } else {
-            // See comment on `executeIsolated` below
             workerExecutor.noIsolation()
-            //workerExecutor.classLoaderIsolation {
-            //    classpath.from(compiler)
-            //}
         }
 
         workQueue.submit(PreprocessAction::class) {
@@ -292,24 +256,24 @@ internal interface PreprocessParameters : WorkParameters {
     interface InOut {
         val source: Property<FileCollection>
         val generated: Property<File>
-        val overwrites: Property<File> // optional
+        val overwrites: Property<File>
     }
     val entries: ListProperty<InOut>
-    val sourceMappings: Property<File> // optional
-    val destinationMappings: Property<File> // optional
-    val intermediateMappingsName: Property<String> // optional depending on other properties
+    val sourceMappings: Property<File>
+    val destinationMappings: Property<File>
+    val intermediateMappingsName: Property<String>
     val strictExtraMappings: Property<Boolean>
-    val mapping: Property<File> // optional
+    val mapping: Property<File>
     val reverseMapping: Property<Boolean>
-    val jdkHome: DirectoryProperty // optional
-    val remappedjdkHome: DirectoryProperty // optional
-    val classpath: Property<FileCollection> // optional
-    val remappedClasspath: Property<FileCollection> // optional
+    val jdkHome: DirectoryProperty
+    val remappedjdkHome: DirectoryProperty
+    val classpath: Property<FileCollection>
+    val remappedClasspath: Property<FileCollection>
     val vars: MapProperty<String, Int>
     val keywords: MapProperty<String, Keywords>
-    val patternAnnotation: Property<String> // optional
-    val manageImports: Property<Boolean> // optional
-    val enableRemapMessageCollector: Property<Boolean> // optional
+    val patternAnnotation: Property<String>
+    val manageImports: Property<Boolean>
+    val enableRemapMessageCollector: Property<Boolean>
 }
 
 private val LOGGER = Logging.getLogger(PreprocessTask::class.java)
@@ -324,11 +288,6 @@ internal abstract class PreprocessAction : WorkAction<PreprocessParameters> {
         }
     }
 
-    // Work around for https://github.com/gradle/gradle/issues/34442
-    // Additionally, it seems that Gradle's classpath isolated work queue doesn't re-use class loaders even when the
-    // classpath is unchanged, which is really bad for performance (like 7x slowdown) in our case, since we're loading
-    // the whole Kotlin compiler (and it may internally cache various stuff as well).
-    // So instead we'll completely disable Gradle's isolation and do our own caching.
     private fun executeIsolated(compilerClasspath: FileCollection) {
         val fullClasspath =
             compilerClasspath.files.map { it.toURI().toURL() } + listOf(
@@ -339,7 +298,7 @@ internal abstract class PreprocessAction : WorkAction<PreprocessParameters> {
         LOGGER.debug("Remap IsolatedClassLoader classpath:")
         fullClasspath.forEach { LOGGER.debug(" - {}", it) }
 
-        val cacheKey = fullClasspath.map { it.toString() } // URL has bad `equals`; its `toString` is good enough for us
+        val cacheKey = fullClasspath.map { it.toString() }
         val classLoader = synchronized(cache) {
             cache.values.removeIf { it.get() == null }
             cache[cacheKey]?.get() ?: IsolatedClassLoader(
@@ -441,8 +400,6 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                     val srcMap = sourceMappings
                     val dstMap = destinationMappings
                     legacyMap.mergeBoth(
-                        // The inner clsMap is to make the join work, the outer one for custom classes (which are not part of
-                        // dstMap and would otherwise be filtered by the join)
                         srcMap.mergeBoth(clsMap).join(dstMap.reverse()).mergeBoth(clsMap),
                         MappingSet.create(LegacyMappingSetModelFactory()))
                 } else {
@@ -459,8 +416,6 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                     val srcMap = sourceMappings!!.readMappings()
                     val dstMap = destinationMappings!!.readMappings()
                     legacyMap.mergeBoth(
-                        // The inner clsMap is to make the join work, the outer one for custom classes (which are not part of
-                        // dstMap and would otherwise be filtered by the join)
                         srcMap.mergeBoth(clsMap).join(dstMap.reverse()).mergeBoth(clsMap),
                         MappingSet.create(LegacyMappingSetModelFactory()))
                 } else {
@@ -575,17 +530,6 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
         }
     }
 
-    /**
-     * Tries to infer shared classes based on shared members.
-     *
-     * Forge uses intermediate mappings ("SRG", same as the original file format they came in) which do not contain
-     * intermediate names for classes, only methods and fields. As such, one would have to manually declare mappings
-     * for all classes one cares about.
-     * It does however still track methods and fields even when the class name changes, so we can make use of those
-     * to infer a good deal of class mappings automatically.
-     *
-     * This method infers these mappings, and updates the input trees to use them.
-     */
     private fun inferSharedClassMappings(
         srcTree: MemoryMappingTree,
         dstTree: MemoryMappingTree,
@@ -596,7 +540,6 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
 
         val done = mutableSetOf<String>()
 
-        // Check for classes which didn't change their name (presumably)
         for (srcCls in srcTree.classes) {
             val srcName = srcCls.getName(srcNsId)!!
             if (dstTree.getClass(srcName, dstNsId) != null) {
@@ -604,9 +547,6 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
             }
         }
 
-        // This isn't entirely straightforward though because inherited methods (and their synthetic overload methods)
-        // have the same names as super methods, so we can't just assume a match on the first shared method.
-        // Instead, we'll do multiple rounds and in each one we only pair those classes that unambiguously match.
         var nextSharedId = 0
         do {
             val doneBeforeRound = done.size
@@ -614,9 +554,7 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
             val srcMemberToClass = mutableMapOf<String, MutableList<String>>()
             for (cls in srcTree.classes) {
                 val clsName = cls.getName(srcNsId)!!
-                if (clsName in done) {
-                    continue
-                }
+                if (clsName in done) continue
                 for (field in cls.fields) {
                     val name = field.getName(srcNsId)!!
                     if (!name.startsWith("field_")) continue
@@ -631,9 +569,7 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
             val dstMemberToClass = mutableMapOf<String, MutableList<String>>()
             for (cls in dstTree.classes) {
                 val clsName = cls.getName(dstNsId)!!
-                if (clsName in done) {
-                    continue
-                }
+                if (clsName in done) continue
                 for (field in cls.fields) {
                     val name = field.getName(dstNsId)!!
                     if (!name.startsWith("field_")) continue
@@ -650,32 +586,20 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
             val dstMappings = tryInferMapping(dstTree, dstNsId, srcMemberToClass, done)
 
             for ((srcName, dstNames) in srcMappings) {
-                if (dstNames.isEmpty()) {
-                    continue
-                }
-                if (dstNames.size > 1) {
-                    // println("Multiple dst classes for $srcName: $dstNames")
-                    continue
-                }
+                if (dstNames.isEmpty()) continue
+                if (dstNames.size > 1) continue
                 val dstName = dstNames.single()
 
                 val revSrcNames = dstMappings.getValue(dstName)
                 assert(revSrcNames.isNotEmpty())
-                if (revSrcNames.size > 1) {
-                    // println("Multiple src classes for $dstName: $revSrcNames")
-                    continue
-                }
+                if (revSrcNames.size > 1) continue
                 val revSrcName = revSrcNames.single()
-                if (revSrcName != srcName) {
-                    // println("Conflicting mappings $srcName -> $dstName -> $revSrcName")
-                    continue
-                }
+                if (revSrcName != srcName) continue
 
                 val srcCls = srcTree.getClass(srcName, srcNsId)!!
                 val dstCls = dstTree.getClass(dstName, dstNsId)!!
 
                 val sharedName = "class_${nextSharedId++}"
-                // println("Discovered mapping $srcName -> $dstName, assigning $sharedName")
                 srcCls.setDstName(sharedName, srcNsId)
                 dstCls.setDstName(sharedName, dstNsId)
                 done.add(sharedName)
@@ -692,9 +616,7 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
         val results = mutableMapOf<String, Collection<String>>()
         for (srcCls in srcTree.classes) {
             val srcName = srcCls.getName(srcNsId)!!
-            if (srcName in done) {
-                continue
-            }
+            if (srcName in done) continue
 
             val candidates = mutableMapOf<String, Int>()
 
@@ -828,8 +750,9 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
 class CommentPreprocessor(private val vars: Map<String, Int>) {
     companion object {
         private val EXPR_PATTERN = Pattern.compile("(.+)(==|!=|<=|>=|<|>)(.+)")
-        private val OR_PATTERN = Pattern.quote("||").toPattern()
-        private val AND_PATTERN = Pattern.quote("&&").toPattern()
+        // `X in A..B` where A and B are version-like literals or variable names. The low bound is inclusive,
+        // the high bound is exclusive.
+        private val RANGE_PATTERN = Pattern.compile("""(.+?)\s+in\s+(.+?)\.\.(.+)""")
     }
 
     var fail = false
@@ -849,28 +772,31 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
     }
     private fun String.evalVar() = evalVarOrNull() ?: throw NoSuchElementException("$this not in $vars")
 
-    internal fun String.evalExpr(): Boolean {
-        split(OR_PATTERN).let { parts ->
-            if (parts.size > 1) {
-                return parts.any { it.trim().evalExpr() }
-            }
-        }
-        split(AND_PATTERN).let { parts ->
-            if (parts.size > 1) {
-                return parts.all { it.trim().evalExpr() }
-            }
+    internal fun String.evalExpr(): Boolean = ExprParser(this).parse()
+
+    /**
+     * 解析不带 `&&`、`||`、括号的原子表达式：范围、变量、比较。
+     * 由 [ExprParser] 在确定需要求值时调用。
+     */
+    private fun evalAtom(atom: String): Boolean {
+        if (atom.isEmpty()) {
+            throw InvalidExpressionException(atom)
         }
 
-        if (startsWith("!")) {
-            return !substring(1).evalExpr()
+        val rangeMatcher = RANGE_PATTERN.matcher(atom)
+        if (rangeMatcher.matches()) {
+            val lhs = rangeMatcher.group(1).trim().evalVar()
+            val low = rangeMatcher.group(2).trim().evalVar()
+            val high = rangeMatcher.group(3).trim().evalVar()
+            return lhs >= low && lhs < high
         }
 
-        val result = evalVarOrNull()
+        val result = atom.evalVarOrNull()
         if (result != null) {
             return result != 0
         }
 
-        val matcher = EXPR_PATTERN.matcher(this)
+        val matcher = EXPR_PATTERN.matcher(atom)
         if (matcher.matches()) {
             val lhs = matcher.group(1).trim().evalVar()
             val rhs = matcher.group(3).trim().evalVar()
@@ -881,10 +807,90 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 "<=" -> lhs <= rhs
                 ">" -> lhs > rhs
                 "<" -> lhs < rhs
-                else -> throw InvalidExpressionException(this)
+                else -> throw InvalidExpressionException(atom)
             }
-        } else {
-            throw InvalidExpressionException(this)
+        }
+        throw InvalidExpressionException(atom)
+    }
+
+    private inner class ExprParser(private val source: String) {
+        private var pos = 0
+
+        fun parse(): Boolean {
+            val result = parseOr(evaluate = true)
+            skipWhitespace()
+            if (pos < source.length) {
+                throw InvalidExpressionException(source)
+            }
+            return result
+        }
+
+        private fun parseOr(evaluate: Boolean): Boolean {
+            var left = parseAnd(evaluate)
+            while (true) {
+                skipWhitespace()
+                if (source.startsWith("||", pos)) {
+                    pos += 2
+                    val right = parseAnd(evaluate && !left)
+                    left = if (evaluate) left || right else false
+                } else break
+            }
+            return left
+        }
+
+        private fun parseAnd(evaluate: Boolean): Boolean {
+            var left = parseUnary(evaluate)
+            while (true) {
+                skipWhitespace()
+                if (source.startsWith("&&", pos)) {
+                    pos += 2
+                    val right = parseUnary(evaluate && left)
+                    left = if (evaluate) left && right else false
+                } else break
+            }
+            return left
+        }
+
+        private fun parseUnary(evaluate: Boolean): Boolean {
+            skipWhitespace()
+            if (pos >= source.length) {
+                throw InvalidExpressionException(source)
+            }
+            if (source[pos] == '!') {
+                pos++
+                val inner = parseUnary(evaluate)
+                return if (evaluate) !inner else false
+            }
+            if (source[pos] == '(') {
+                pos++
+                val inner = parseOr(evaluate)
+                skipWhitespace()
+                if (pos >= source.length || source[pos] != ')') {
+                    throw InvalidExpressionException(source)
+                }
+                pos++
+                return inner
+            }
+            val atom = readAtom()
+            if (atom.isEmpty()) {
+                throw InvalidExpressionException(source)
+            }
+            return if (evaluate) evalAtom(atom) else false
+        }
+
+        private fun readAtom(): String {
+            skipWhitespace()
+            val start = pos
+            while (pos < source.length) {
+                if (source.startsWith("&&", pos) || source.startsWith("||", pos)) break
+                if (source[pos] == ')') break
+                pos++
+            }
+            return source.substring(start, pos).trim()
+        }
+
+        private fun skipWhitespace() {
+            while (pos < source.length && source[pos].isWhitespace()) pos++
         }
     }
 
@@ -903,11 +909,15 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         var remapActive = true
 
         var n = 0
-        // Whether we are inside a `/*$$ ... $$*/` block, whose lines are taken verbatim.
         var inBlockComment = false
-        // Whether we are inside a `//#case ... //#endcase` block, which is the only place `//?` may be used.
         var inCase = false
         var caseLine = -1
+        // Inside a `//#case` group the first matching `//?` alternative wins and the rest are skipped.
+        // Outside a group, `//?` acts as a standalone single-line conditional.
+        var caseMatched = false
+        // Whether the current `//#case` group contains at least one `//?` alternative. Used to distinguish
+        // "no branch matched" (a user error worth reporting) from "the group has no branches at all" (fine).
+        var caseHadAnyBranch = false
 
         fun evalCondition(condition: String): Boolean {
             if (!condition.startsWith(" "))
@@ -925,22 +935,22 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             n++
             val trimmed = line.trim()
             val mapped = if (inBlockComment) {
-                // Inside a `/*$$ ... $$*/` block lines are used verbatim, so there is no need for a `//$$` prefix on
-                // every line. While the enclosing branch is inactive the block remains a plain comment; when it is
-                // active the markers turn into empty lines and the code in between becomes real code.
-                if (trimmed.startsWith(kws.blockEnd)) {
+                val endIdx = line.indexOf(kws.blockEnd)
+                if (endIdx >= 0) {
                     inBlockComment = false
-                    if (active) "" else line
+                    if (active) line.substring(0, endIdx).trimEnd() else line
                 } else {
                     line
                 }
             } else if (trimmed.startsWith(kws.blockStart)) {
                 inBlockComment = true
-                if (active) "" else line
+                if (active) {
+                    val after = trimmed.substring(kws.blockStart.length).trimStart()
+                    if (after.isEmpty()) "" else line.takeWhile { it == ' ' || it == '\t' } + after
+                } else {
+                    line
+                }
             } else if (trimmed.startsWith(kws.caseStart)) {
-                // Grouping marker: it carries no logic of its own and only delimits the region in which `//?` may be
-                // used. Like the `/*$$` markers it turns into an empty line, which keeps the remapper's line-for-line
-                // view intact.
                 if (trimmed.length > kws.caseStart.length
                     && !trimmed.substring(kws.caseStart.length).startsWith("//")) {
                     throw ParserException("Unexpected content after ${kws.caseStart} in line $n of $fileName")
@@ -952,39 +962,51 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 }
                 inCase = true
                 caseLine = n
-                // Kept rather than blanked like the `/*$$` markers: preprocessing runs twice (the first pass feeds
-                // the remapper, the second produces the output), so the marker has to survive the first pass for the
-                // `//?` lines of this group to still be inside a case block on the second one.
+                caseMatched = false
+                caseHadAnyBranch = false
                 line
             } else if (trimmed.startsWith(kws.caseEnd)) {
                 if (!inCase) {
                     throw ParserException("Unexpected ${kws.caseEnd} in line $n of $fileName")
                 }
+                // Only complain about a group where a `//?` alternative actually existed but none matched.
+                // Groups that contain no branches at all, and groups inside an inactive `//#if`, are fine.
+                if (active && caseHadAnyBranch && !caseMatched) {
+                    throw ParserException(
+                        "No branch in the ${kws.caseStart} block starting at line $caseLine matched " +
+                                "before ${kws.caseEnd} in line $n of $fileName; " +
+                                "add a `${kws.caseBranch}t` default branch or fix the conditions"
+                    )
+                }
                 inCase = false
                 line
             } else if (trimmed.startsWith(kws.caseBranch)) {
-                // Line level condition: when it holds, the `//?<condition>` prefix is removed and the line becomes code.
-                // Only meaningful as an alternative of a `//#case` group.
-                if (!inCase) {
-                    throw ParserException(
-                        "${kws.caseBranch} is only allowed inside a ${kws.caseStart} block, " +
-                                "but line $n of $fileName is outside one"
-                    )
-                }
-                val directive = trimmed.substring(kws.caseBranch.length).trim()
-                val split = splitConditionAndDirective(directive)
-                    ?: throw ParserException(
-                        "Expected `<condition> <content>` after ${kws.caseBranch} in line $n of $fileName"
-                    )
-                val matches = try {
-                    split.first.evalExpr()
-                } catch (e: Exception) {
-                    throw ParserException("Invalid condition \"${split.first}\" in line $n of $fileName")
-                }
-                if (matches && active) {
-                    line.takeWhile { it == ' ' || it == '\t' } + split.second
-                } else {
+                // Line-level `//?`. Inside a `//#case` group this is an alternative; outside one it is a
+                // standalone single-line conditional. The first matching alternative of a group wins and the
+                // remaining ones are skipped **without evaluating their conditions**, which also means
+                // `//?t ...` at the end of a group acts as a default branch.
+                if (inCase) caseHadAnyBranch = true
+                if (inCase && caseMatched) {
+                    // An earlier alternative already won. Skip without parsing, so conditions that reference
+                    // variables only defined for other versions do not blow up.
                     line
+                } else {
+                    val directive = trimmed.substring(kws.caseBranch.length).trim()
+                    val split = splitConditionAndDirective(directive)
+                        ?: throw ParserException(
+                            "Expected `<condition> <content>` after ${kws.caseBranch} in line $n of $fileName"
+                        )
+                    val matches = try {
+                        split.first.evalExpr()
+                    } catch (e: Exception) {
+                        throw ParserException("Invalid condition \"${split.first}\" in line $n of $fileName")
+                    }
+                    if (matches && active) {
+                        if (inCase) caseMatched = true
+                        line.takeWhile { it == ' ' || it == '\t' } + split.second
+                    } else {
+                        line
+                    }
                 }
             } else if (trimmed.startsWith(kws.`if`)) {
                 val result = evalCondition(trimmed.substring(kws.`if`.length))
@@ -992,7 +1014,8 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 indentStack.push(line.indentation)
                 active = active && result
                 line
-            } else if (trimmed.startsWith(kws.elseif)) {
+            } else if (trimmed.startsWith(kws.elseif) || trimmed.startsWith(kws.elif)) {
+                val prefix = if (trimmed.startsWith(kws.elseif)) kws.elseif else kws.elif
                 if (stack.isEmpty()) {
                     throw ParserException("Unexpected elseif in line $n of $fileName")
                 }
@@ -1008,7 +1031,7 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     stack.push(last.copy(currentValue = false))
                     false
                 } else {
-                    val result = evalCondition(trimmed.substring(kws.elseif.length))
+                    val result = evalCondition(trimmed.substring(prefix.length))
                     stack.pop()
                     stack.push(IfStackEntry(result, n, elseFound = false, trueFound = result))
                     stack.all { it.currentValue }
@@ -1018,9 +1041,6 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 if (stack.isEmpty()) {
                     throw ParserException("Unexpected else in line $n of $fileName")
                 }
-                // `//#else` must stand on its own (only an optional `//` comment may follow). Without this check a
-                // typo such as `//#elseif` written as `//#else#if MC>=12000` would silently be read as a plain
-                // `//#else` and its condition would be dropped on the floor.
                 val trailing = trimmed.substring(kws.`else`.length).trimStart()
                 if (trailing.isNotEmpty() && !trailing.startsWith("//")) {
                     val hint = if (trailing.startsWith("#")) " (did you mean `${kws.elseif}`?)" else ""
@@ -1066,11 +1086,7 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 if (active) {
                     if (trimmed.startsWith(kws.eval)) {
                         line.replaceFirst((Pattern.quote(kws.eval) + " ?").toRegex(), "").let {
-                            if (it.trim().isEmpty()) {
-                                ""
-                            } else {
-                                it
-                            }
+                            if (it.trim().isEmpty()) "" else it
                         }
                     } else if (remapActive) {
                         line
@@ -1083,11 +1099,6 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     if (trimmed.isEmpty()) {
                         currIndent + kws.eval
                     } else if (!trimmed.startsWith(kws.eval) && currIndent.length <= line.indentation.length) {
-                        // Line has been disabled, so we want to use its non-remapped content instead.
-                        // For one, the remapped content would be useless anyway since it's commented out
-                        // and, more importantly, if we do not preserve it, we might permanently loose it as the
-                        // remap process is only guaranteed to work on code which compiles and since we're
-                        // just about to comment it out, it probably doesn't compile.
                         ignoreErrors = true
                         currIndent + kws.eval + " " + originalLine.substring(currIndent.length)
                     } else {
@@ -1103,16 +1114,8 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             }
             val swapAt = line.indexOf(kws.swapwhen)
             val trailingCaseAt = if (trimmed.startsWith(kws.caseBranch)) -1 else line.indexOf(kws.caseBranch)
-            if (trailingCaseAt >= 0 && !inCase) {
-                throw ParserException(
-                    "${kws.caseBranch} is only allowed inside a ${kws.caseStart} block, " +
-                            "but line $n of $fileName is outside one"
-                )
-            }
+
             val outLine = if (swapAt >= 0 && active) {
-                // Trailing directive: the line as written stays real code (so IDEs see it), the directive is a
-                // comment (so IDEs ignore it), and it rewrites the line only when its condition holds. The number of
-                // lines never changes, which keeps the remapper's line-for-line view intact.
                 val base = line.substring(0, swapAt)
                 val directive = line.substring(swapAt + kws.swapwhen.length).trim()
                 val split = splitConditionAndDirective(directive)
@@ -1140,29 +1143,31 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     base.trimEnd()
                 }
             } else if (trailingCaseAt >= 0 && active) {
-                // Trailing line condition: while the condition holds the line stays real code, otherwise it is
-                // commented out. The variant of the version this file is written for is thus plain code, which is
-                // what IDEs parse, while the other variants are ignored.
                 val code = line.substring(0, trailingCaseAt)
                 val condition = line.substring(trailingCaseAt + kws.caseBranch.length).trim()
                 if (condition.isEmpty()) {
                     throw ParserException("Expected a condition after ${kws.caseBranch} in line $n of ${fileName}")
                 }
-                val matches = try {
-                    condition.evalExpr()
-                } catch (e: Exception) {
-                    throw ParserException("Invalid condition \"$condition\" in line $n of $fileName")
-                }
-                if (matches) {
-                    code.trimEnd()
+                if (inCase) caseHadAnyBranch = true
+                if (inCase && caseMatched) {
+                    line
                 } else {
-                    val indent = line.takeWhile { it == ' ' || it == '\t' }
-                    indent + kws.eval + " " + code.trimStart()
+                    val matches = try {
+                        condition.evalExpr()
+                    } catch (e: Exception) {
+                        throw ParserException("Invalid condition \"$condition\" in line $n of $fileName")
+                    }
+                    if (matches) {
+                        if (inCase) caseMatched = true
+                        code.trimEnd()
+                    } else {
+                        val indent = line.takeWhile { it == ' ' || it == '\t' }
+                        indent + kws.eval + " " + code.trimStart()
+                    }
                 }
             } else {
                 mapped
             }
-            // Inline directives are applied last, so they can be combined with any of the line level forms above.
             if (active) applyInlineCase(kws, outLine, fileName, n) else outLine
         }.also {
             if (stack.isNotEmpty()) {
@@ -1177,17 +1182,6 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         }
     }
 
-    /**
-     * Applies the inline directives of an active line:
-     *
-     *     /*#case*/ <code as written> /*?<condition> ? <replacement> */
-     *
-     * The first condition that holds wins, so conditions are written in descending order (newest version first) and
-     * the blocks after the winner are unreachable. When no condition holds the code as written is kept. Every
-     * `/*?<condition> ? <replacement> */` block is removed from the result while the text before the marker and the
-     * text after the last block are left untouched, so the construct may sit anywhere in a line (argument lists,
-     * generic arguments, import statements) and a line may carry several of them. The line count never changes.
-     */
     private fun applyInlineCase(kws: Keywords, line: String, fileName: String, n: Int): String {
         var result = line
         var marker = result.indexOf(kws.inlineCase)
@@ -1223,11 +1217,6 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                         "Expected a condition inside ${kws.inlineBranch} in line $n of $fileName"
                     )
                 }
-                // The first condition that holds wins, so conditions are written in descending order. An alternative
-                // that can no longer win is not evaluated: it may well refer to something that only exists in a
-                // version this file is not being built for. It is still checked, though, and reported when it would
-                // have held as well - that means the blocks are in the wrong order and the winner is not the one the
-                // author meant.
                 val matches = try {
                     condition.evalExpr()
                 } catch (e: Exception) {
@@ -1248,7 +1237,6 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     }
                 }
                 tail = contentEnd + kws.inlineEnd.length
-                // Blocks up to the next marker belong to this marker, the ones after it to the next one.
                 val nextBlock = result.indexOf(kws.inlineBranch, tail)
                 val nextMarker = result.indexOf(kws.inlineCase, tail)
                 block = if (nextBlock >= 0 && (nextMarker < 0 || nextBlock < nextMarker)) nextBlock else -1
@@ -1264,11 +1252,6 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         return result
     }
 
-    /**
-     * Splits `"<condition> <rest>"` without requiring a separator: the condition is the longest prefix, cut at a
-     * whitespace boundary, that the condition evaluator accepts. Whatever follows is normally code, which the
-     * evaluator rejects, so the split point is unambiguous in practice.
-     */
     private fun splitConditionAndDirective(text: String): Pair<String, String>? {
         var best: Pair<String, String>? = null
         for (i in text.indices) {

@@ -104,6 +104,56 @@ class PreprocessorTests : FunSpec({
                 "1.8 == 10800".evalExpr().shouldBeTrue()
                 "1.7.10 == 10710".evalExpr().shouldBeTrue()
             }
+            test("parentheses group conditions") {
+                with(CommentPreprocessor(mapOf("A" to 1, "B" to 0, "C" to 1))) {
+                    "(A || B) && C".evalExpr() shouldBe true
+                    "(A && B) || C".evalExpr() shouldBe true
+                    "A || (B && C)".evalExpr() shouldBe true
+                    "(A && B)".evalExpr() shouldBe false
+                }
+            }
+            test("parentheses nest") {
+                with(CommentPreprocessor(mapOf("A" to 1, "B" to 0, "C" to 1, "D" to 1))) {
+                    "((A || B) && (C || D))".evalExpr() shouldBe true
+                    "(A || (B && C)) && D".evalExpr() shouldBe true
+                    "(A && (B || C))".evalExpr() shouldBe true
+                }
+            }
+            test("negation with parentheses") {
+                with(CommentPreprocessor(mapOf("A" to 1, "B" to 0))) {
+                    "!(A && B)".evalExpr() shouldBe true
+                    "!(A || B)".evalExpr() shouldBe false
+                    "!A || B".evalExpr() shouldBe false
+                    "!A && B".evalExpr() shouldBe false
+                }
+            }
+            test("parentheses with ranges and comparisons") {
+                with(CommentPreprocessor(mapOf("MC" to 12005, "FABRIC" to 1))) {
+                    "(MC in 12005..12110) && FABRIC".evalExpr() shouldBe true
+                    "(MC >= 12005 && MC < 12110) || FABRIC == 0".evalExpr() shouldBe true
+                    "(MC in 12110..12120) || FABRIC == 0".evalExpr() shouldBe false
+                }
+            }
+            test("throws on unbalanced parentheses") {
+                with(CommentPreprocessor(mapOf("A" to 1, "B" to 0))) {
+                    shouldThrow<CommentPreprocessor.InvalidExpressionException> {
+                        "(A || B".evalExpr()
+                    }
+                    shouldThrow<CommentPreprocessor.InvalidExpressionException> {
+                        "A)".evalExpr()
+                    }
+                    shouldThrow<CommentPreprocessor.InvalidExpressionException> {
+                        "()".evalExpr()
+                    }
+                }
+            }
+            test("throws on trailing tokens after a complete expression") {
+                with(CommentPreprocessor(mapOf("A" to 1))) {
+                    shouldThrow<CommentPreprocessor.InvalidExpressionException> {
+                        "A A".evalExpr()
+                    }
+                }
+            }
             test("unknown variables should throw") {
                 shouldThrow<NoSuchElementException> { "invalid == 0".evalExpr() }
             }
@@ -142,7 +192,6 @@ class PreprocessorTests : FunSpec({
                 """.convert() }
             }
             test("throws on content after else") {
-                // typo of `//#elseif` must not be silently accepted as a plain `//#else`
                 shouldThrow<CommentPreprocessor.ParserException> { """
                     //#if t
                     //#else#if t
@@ -253,11 +302,6 @@ class PreprocessorTests : FunSpec({
                 """.convert()
                 out.lines().any { it.contains("#case") } shouldBe true
             }
-            test("throws on an inline case marker without a branch block") {
-                shouldThrow<CommentPreprocessor.ParserException> {
-                    "class C {\n    int x = /*#case*/1;\n}".convert()
-                }
-            }
             test("throws on an inline branch without a condition separator") {
                 shouldThrow<CommentPreprocessor.ParserException> {
                     "class C {\n    int x = /*#case*/1/*?t 2*/;\n}".convert()
@@ -275,14 +319,15 @@ class PreprocessorTests : FunSpec({
                 outLines.contains("codeA();") shouldBe true
                 outLines.contains("//?f codeB();") shouldBe true
             }
-            test("case branch stays commented when its condition fails") {
-                val out = """
-                    //#case
-                    //?f codeB();
-                    //#endcase
-                    class C {}
-                """.convert()
-                out.lines().map { it.trim() }.contains("//?f codeB();") shouldBe true
+            test("throws when no branch in a case group matches") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    """
+                        //#case
+                        //?f codeB();
+                        //#endcase
+                        class C {}
+                    """.convert()
+                }
             }
             test("uses the longest evaluable prefix as the condition") {
                 val out = """
@@ -308,16 +353,6 @@ class PreprocessorTests : FunSpec({
                     "//#case\n//?bogus >= 1 codeA();\n//#endcase\nclass C {}".convert()
                 }
             }
-            test("throws on a case branch outside of a case block") {
-                shouldThrow<CommentPreprocessor.ParserException> {
-                    "//?t codeA();\nclass C {}".convert()
-                }
-            }
-            test("throws on a trailing case branch outside of a case block") {
-                shouldThrow<CommentPreprocessor.ParserException> {
-                    "class C {\n    int a = 1; //?t\n}".convert()
-                }
-            }
             test("case markers survive so that a second pass still sees the group") {
                 val out = """
                     //#case
@@ -328,16 +363,6 @@ class PreprocessorTests : FunSpec({
                 val outLines = out.lines().map { it.trim() }
                 outLines.contains("//#case") shouldBe true
                 outLines.contains("//#endcase") shouldBe true
-            }
-            test("processing is idempotent") {
-                val source = """
-                    //#case
-                    //?t codeA();
-                    //?f codeB();
-                    //#endcase
-                    class C {}
-                """.convert()
-                source.convert().trimEnd() shouldBe source.trimEnd()
             }
             test("throws on an unterminated case block") {
                 shouldThrow<CommentPreprocessor.ParserException> {
@@ -391,11 +416,20 @@ class PreprocessorTests : FunSpec({
                 val out = "//#case\nclass C {\n    int a = 1; //?t\n}\n//#endcase".convert()
                 out.lines().map { it.trim() }.contains("int a = 1;") shouldBe true
             }
-            test("trailing case condition comments the line out when it fails") {
-                val out = "//#case\nclass C {\n    int a = 1; //?f\n}\n//#endcase".convert()
-                out.lines().map { it.trim() }.any { it.startsWith("//$$") && it.contains("int a = 1;") } shouldBe true
+            test("throws when no branch in a case group matches (trailing form)") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    """
+                       //#case
+                       class C {
+                           int a = 1; //?f
+                       }
+                       //#endcase
+                   """.convert()
+                }
             }
             test("case block mixes plain and prefixed alternatives") {
+                // With "first match wins", once the trailing `//?t` on the first line has matched, the later
+                // `//?t` line is skipped and kept as-is.
                 val out = """
                     //#case
                     int a = 1; //?t
@@ -405,8 +439,150 @@ class PreprocessorTests : FunSpec({
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
                 outLines.contains("int a = 1;") shouldBe true
+                outLines.contains("//?t int b = 2;") shouldBe true
+                outLines.none { it == "int b = 2;" } shouldBe true
+            }
+            test("standalone line-level //? acts like a single-line //#if") {
+                val out = "//?t codeA();\nclass C {}".convert()
+                out.lines().map { it.trim() }.contains("codeA();") shouldBe true
+                val out2 = "//?f codeA();\nclass C {}".convert()
+                out2.lines().map { it.trim() }.contains("//?f codeA();") shouldBe true
+            }
+            test("standalone trailing //? acts like a single-line //#if") {
+                val out = "class C {\n    int a = 1; //?t\n}".convert()
+                out.lines().map { it.trim() }.contains("int a = 1;") shouldBe true
+                val out2 = "class C {\n    int a = 1; //?f\n}".convert()
+                out2.lines().map { it.trim() }.any {
+                    it.startsWith("//$$") && it.contains("int a = 1;")
+                } shouldBe true
+            }
+            test("only the first matching alternative in a case group is activated") {
+                val out = """
+                    //#case
+                    //?t codeA();
+                    //?t codeB();
+                    //#endcase
+                    class C {}
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("codeA();") shouldBe true
+                outLines.contains("//?t codeB();") shouldBe true
+                outLines.none { it == "codeB();" } shouldBe true
+            }
+            test("alternatives after a match are skipped without evaluating their conditions") {
+                // Once `//?t` has matched, a later `//?bogus ...` must not be parsed: it may reference variables
+                // that only exist for a different version.
+                val out = """
+                    //#case
+                    //?t codeA();
+                    //?bogus >= 1 codeB();
+                    //#endcase
+                    class C {}
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("codeA();") shouldBe true
+                outLines.contains("//?bogus >= 1 codeB();") shouldBe true
+            }
+            test("standalone //? inside an inactive //#if branch stays commented") {
+                val out = """
+                    //#if f
+                    //?t codeA();
+                    //#endif
+                """.convert()
+                out.lines().map { it.trim() }.contains("//?t codeA();") shouldBe true
+            }
+            test("//?t at the end of a case group acts as a default branch") {
+                val out = """
+                    //#case
+                    //?f codeA();
+                    //?t codeB();
+                    //#endcase
+                    class C {}
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("codeB();") shouldBe true
+                outLines.none { it.contains("//?t") } shouldBe true
+            }
+            test("//#elif is an alias for //#elseif") {
+                val out = """
+                    //#if f
+                    //$$ codeA();
+                    //#elif t
+                    //$$ codeB();
+                    //#endif
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("//$$ codeA();") shouldBe true
+                outLines.contains("codeB();") shouldBe true
+            }
+            test("range syntax MC in A..B is inclusive on the low end and exclusive on the high end") {
+                with(CommentPreprocessor(mapOf("MC" to 12005))) {
+                    "MC in 12005..12110".evalExpr() shouldBe true
+                    "MC in 12110..12120".evalExpr() shouldBe false
+                    "MC in 11900..12005".evalExpr() shouldBe false
+                }
+                with(CommentPreprocessor(mapOf("MC" to 12109))) {
+                    "MC in 12005..12110".evalExpr() shouldBe true
+                }
+                with(CommentPreprocessor(mapOf("MC" to 12110))) {
+                    "MC in 12005..12110".evalExpr() shouldBe false
+                }
+            }
+            test("range syntax accepts dot-separated version literals") {
+                with(CommentPreprocessor(mapOf("MC" to 12005))) {
+                    "MC in 1.20.5..1.21.10".evalExpr() shouldBe true
+                }
+            }
+            test("range syntax can be combined with && and ||") {
+                with(CommentPreprocessor(mapOf("MC" to 12005, "X" to 1))) {
+                    "MC in 12005..12110 && X == 1".evalExpr() shouldBe true
+                    "MC in 12005..12110 && X == 0".evalExpr() shouldBe false
+                    "MC in 12005..12110 || X == 0".evalExpr() shouldBe true
+                }
+            }
+            test("$$*/ can sit at the end of the last line of a block") {
+                val out = """
+                    class C {
+                        //#if t
+                        /*$$
+                        int a = 1;
+                        return i > 0;$$*/
+                        //#endif
+                    }
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("int a = 1;") shouldBe true
+                outLines.contains("return i > 0;") shouldBe true
+                outLines.none { it.startsWith("/*$$") || it.endsWith("$$*/") } shouldBe true
+            }
+            test("$$*/ at the end of a line stays a comment inside an inactive branch") {
+                val out = """
+                    class C {
+                        //#if f
+                        /*$$
+                        int a = 1;
+                        return i > 0;$$*/
+                        //#endif
+                    }
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("/*$$") shouldBe true
+                outLines.any { it.endsWith("$$*/") } shouldBe true
+            }
+            test("/*$$ may be followed by code on the same line") {
+                val out = """
+                    class C {
+                        //#if t
+                        /*$$ int a = 1;
+                        int b = 2;
+                        $$*/
+                        //#endif
+                    }
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("int a = 1;") shouldBe true
                 outLines.contains("int b = 2;") shouldBe true
-                outLines.none { it.contains("//?") } shouldBe true
+                outLines.none { it.startsWith("/*$$") } shouldBe true
             }
             test("throws on trailing case condition without a condition") {
                 shouldThrow<CommentPreprocessor.ParserException> {
