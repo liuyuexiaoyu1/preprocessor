@@ -884,7 +884,19 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 if (stack.isEmpty()) {
                     throw ParserException("Unexpected else in line $n of $fileName")
                 }
-                val entry = stack.pop()
+                // `//#else` must stand on its own (only an optional `//` comment may follow). Without this check a
+                // typo such as `//#elseif` written as `//#else#if MC>=12000` would silently be read as a plain
+                // `//#else` and its condition would be dropped on the floor.
+                val trailing = trimmed.substring(kws.`else`.length).trimStart()
+                if (trailing.isNotEmpty() && !trailing.startsWith("//")) {
+                    val hint = if (trailing.startsWith("#")) " (did you mean `${kws.elseif}`?)" else ""
+                    throw ParserException("Unexpected content after ${kws.`else`} in line $n of $fileName$hint")
+                }
+                val entry = stack.last()
+                if (entry.elseFound) {
+                    throw ParserException("Unexpected else after else in line $n of $fileName")
+                }
+                stack.pop()
                 stack.push(IfStackEntry(!entry.trueFound, n, elseFound = true, trueFound = entry.trueFound))
                 indentStack.pop()
                 indentStack.push(line.indentation)

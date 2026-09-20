@@ -133,6 +133,31 @@ class PreprocessorTests : FunSpec({
                     //#endif
                 """.convert() }
             }
+            test("throws on else after else") {
+                shouldThrow<CommentPreprocessor.ParserException> { """
+                    //#if t
+                    //#else
+                    //#else
+                    //#endif
+                """.convert() }
+            }
+            test("throws on content after else") {
+                // typo of `//#elseif` must not be silently accepted as a plain `//#else`
+                shouldThrow<CommentPreprocessor.ParserException> { """
+                    //#if t
+                    //#else#if t
+                    //#endif
+                """.convert() }
+                shouldThrow<CommentPreprocessor.ParserException> { "//#if t\n//#else t\n//#endif".convert() }
+            }
+            test("allows comment after else") {
+                """
+                    //#if f
+                    //#else // comment is fine
+                    //$$ print(ok)
+                    //#endif
+                """.convert()
+            }
             test("throws on missing endif") {
                 shouldThrow<CommentPreprocessor.ParserException> { "//#if t".convert() }
                 shouldThrow<CommentPreprocessor.ParserException> { "//#if t\n//#if t\n//#endif".convert() }
