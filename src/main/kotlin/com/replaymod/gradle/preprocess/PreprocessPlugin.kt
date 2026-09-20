@@ -16,6 +16,7 @@ import org.gradle.api.artifacts.Configuration
 import org.gradle.api.file.Directory
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.file.SourceDirectorySet
+import org.gradle.api.initialization.Settings
 import org.gradle.api.provider.Property
 import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.*
@@ -30,11 +31,43 @@ import java.util.stream.Collectors
 import kotlin.io.path.name
 import kotlin.io.path.toPath
 
-class PreprocessPlugin : Plugin<Project> {
-    override fun apply(project: Project) {
+/**
+ * Applies the preprocess plugin to a [Project] (the usual case) or to [Settings].
+ *
+ * Applying it to settings makes the preprocess graph available while subprojects are being included, so node data
+ * (project names, mc versions, ...) can be used to derive `projectDir`/`buildFileName` instead of having to be
+ * declared twice, and the same graph is reused by the projects later on.
+ */
+class PreprocessPlugin : Plugin<Any> {
+    override fun apply(target: Any) {
+        when (target) {
+            is Settings -> applyToSettings(target)
+            is Project -> applyToProject(target)
+            else -> throw UnsupportedOperationException("Cannot apply preprocess plugin to ${target.javaClass.name}")
+        }
+    }
+
+    /**
+     * Registers the preprocess graph on the settings object and publishes it to the [Gradle]'s extra properties, which
+     * is how the root project picks it up again in [applyToProject].
+     */
+    private fun applyToSettings(settings: Settings) {
+        val extension = settings.extensions.create(SETTINGS_EXTENSION_NAME, RootPreprocessExtension::class.java)
+        settings.gradle.extensions.extraProperties.set(SETTINGS_EXTENSION_KEY, extension)
+    }
+
+    private fun applyToProject(project: Project) {
         val parent = project.parent
         if (parent == null) {
-            project.apply<RootPreprocessPlugin>()
+            val extra = project.gradle.extensions.extraProperties
+            val fromSettings = if (extra.has(SETTINGS_EXTENSION_KEY)) extra.get(SETTINGS_EXTENSION_KEY) else null
+            if (fromSettings is RootPreprocessExtension) {
+                // The graph was already declared in settings.gradle(.kts); expose that same instance here so the
+                // subproject code paths below (and the root build script) keep working unchanged.
+                project.extensions.add(RootPreprocessExtension::class.java, ROOT_EXTENSION_NAME, fromSettings)
+            } else {
+                project.apply<RootPreprocessPlugin>()
+            }
             return
         }
 
@@ -353,6 +386,12 @@ class PreprocessPlugin : Plugin<Project> {
         }
 
         return remapKotlinCompilerClasspath
+    }
+
+    companion object {
+        internal const val ROOT_EXTENSION_NAME = "preprocess"
+        internal const val SETTINGS_EXTENSION_NAME = "preprocess"
+        internal const val SETTINGS_EXTENSION_KEY = "com.replaymod.preprocess.settingsExtension"
     }
 }
 
