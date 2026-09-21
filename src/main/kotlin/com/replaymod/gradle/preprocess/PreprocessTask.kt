@@ -1508,10 +1508,30 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         return null
     }
 
+    /**
+     * Writes an intermediate artifact when the `PREPROCESS_DUMP_DIR` environment variable is set, so the text the
+     * remapper received can be compared with the text it produced.
+     */
+    private fun dump(name: String, content: String) {
+        val dir = System.getenv("PREPROCESS_DUMP_DIR") ?: return
+        try {
+            val file = java.io.File(dir, name)
+            file.parentFile?.mkdirs()
+            file.writeText(content)
+        } catch (e: Exception) {
+            System.err.println("preprocess: could not write dump '$name': ${e.message}")
+        }
+    }
+
     fun convertFile(kws: Keywords, inFile: File, outFile: File, remap: ((List<String>) -> List<Pair<String, List<String>>>)? = null) {
         val string = inFile.readText()
         var lines = string.lines()
         val remapped = remap?.invoke(lines) ?: lines.map { Pair(it, emptyList()) }
+        dump(inFile.name + ".source.txt", string)
+        dump(
+            inFile.name + ".secondpass.txt",
+            remapped.mapIndexed { index, pair -> "${index + 1}: ${pair.first}" }.joinToString("\n")
+        )
         try {
             lines = convertSource(kws, lines, remapped, inFile.path)
         } catch (e: Throwable) {
