@@ -1,38 +1,39 @@
-Modifications in this fork
+预处理器（增强 Fork）
+========================
 
-- Add automatic tab indentation support
-- Add `mainProjectFile` and `mainProjectFileRel` for more flexible subproject layout
+本仓库基于 [ReplayMod/preprocessor](https://github.com/ReplayMod/preprocessor) 与
+[Fallen-Breath/preprocessor](https://github.com/Fallen-Breath/preprocessor)。
+
+English documentation: [README_en.md](README_en.md)
+
+## 本 Fork 的改动
+
+### 构建与集成
+
+- 支持自动 tab 缩进
+- 新增 `mainProjectFile` 与 `mainProjectFileRel`，子项目布局更灵活
   ```groovy
-  // in root project
+  // 在根项目中
   preprocess {
-    // base dir: root project directory. Use mainProjectFileRel if not provided
+    // 基准目录：根项目目录。未提供时使用 mainProjectFileRel
     mainProjectFile = "versions/mainProject"
-    // base dir: subproject directory. Default: "../mainProject"
+    // 基准目录：子项目目录。默认值： "../mainProject"
     mainProjectFileRel = "../../mainProject"
   }
   ```
-- Use the node of the current core project (defined in file `mainProject`) as the root node of the graph, so less compilation work when switch to and compile a subproject. Noted: this doesn't work for tasks of the root project
-- Add line number hint for "Missing endif" error
-- Improved error message when using an undefined variable in the `//#if` expression
-- Improved srg mapping mode detection when using architectury loom
-- Use custom [remap](https://github.com/ReplayMod/remap) fork: https://github.com/Fallen-Breath/remap
-  - Less useless warning messages
-  - Disable message logging of remap's kotlin compiler message collector by default. You can re-enable that by setting `preprocess { enableRemapMessageCollector = true }`
-- Gradle 9 configuration cache compatibility
-  - Task fields no longer hold a `Configuration` or a `Project`, both of which made the configuration cache fail while storing the task state
-- Add a `//#import` directive for version-conditional imports ([#18](https://github.com/ReplayMod/preprocessor/issues/18))
-  ```java
-  //#if MC >= 12001
-  //$$ return entity.getPortalCooldown();
-  //#else
-  //#import com.example.mixin.EntityAccessor;
-  return ((EntityAccessor) entity).getPortalCooldown();
-  //#endif
-  ```
-  Imports of active branches are merged into the import section of the processed file (skipping ones it already has). The directive is only valid inside a conditional block, an isolated `//#import` is reported as an error.
-- Be strict about `//#else` ([#13](https://github.com/ReplayMod/preprocessor/issues/13))
-  - Content after `//#else` (such as the `//#elseif` typo `//#else#if MC>=12000`) is rejected, and so is a second `//#else` for the same `//#if`
-- Allow declaring the preprocess graph in `settings.gradle(.kts)` ([#26](https://github.com/ReplayMod/preprocessor/issues/26))
+- 以当前 core 项目（在 `mainProject` 文件中定义）的节点作为图的根节点，切换并编译子项目时
+  减少编译量。注意：对根项目的任务不生效
+- "Missing endif" 报错附带行号提示
+- `//#if` 中使用未定义变量时给出更清晰的报错
+- 使用 architectury loom 时改进 srg 映射模式的探测
+- 使用自定义的 [remap](https://github.com/ReplayMod/remap) 分支：https://github.com/Fallen-Breath/remap
+  - 减少无意义的警告信息
+  - 默认关闭 remap 的 kotlin 编译器消息收集。可通过
+    `preprocess { enableRemapMessageCollector = true }` 重新开启
+- 兼容 Gradle 9 的配置缓存
+  - 任务字段不再持有 `Configuration` 或 `Project`，它们都会让任务状态存储阶段的配置缓存失败
+  - `preprocessCode` 的跨项目 classpath 不再触发"未持有独占锁就解析另一个项目的配置"错误
+- 允许在 `settings.gradle(.kts)` 中声明预处理图（[#26](https://github.com/ReplayMod/preprocessor/issues/26)）
   ```kotlin
   // settings.gradle.kts
   plugins { id("com.replaymod.preprocess") version "<version>" }
@@ -47,24 +48,168 @@ Modifications in this fork
       }
   }
   ```
-  The graph is shared with the projects, so an existing `build.gradle(.kts)` setup keeps working unchanged.
+  图会与各个项目共享，因此已有的 `build.gradle(.kts)` 配置无需改动即可继续工作
+- 严格化 `//#else`（[#13](https://github.com/ReplayMod/preprocessor/issues/13)）
+  - `//#else` 之后的内容（例如把 `//#elseif` 误写成 `//#else#if MC>=12000`）
+    会被拒绝，同一个 `//#if` 出现第二个 `//#else` 同样会被拒绝
+- 修复 `//#ifdef`：此前它会被 `//#if` 抢先匹配，条件被解析成 `def <变量名>` 而报错，实际从未生效
+- 条件表达式报错时附带当前变量取值，例如
+  `Invalid condition "MC >= 12105" in line 12 of Foo.java (vars: MC=12105, FABRIC=1)`
 
-### The Preprocessor
-To support multiple Minecraft versions with the ReplayMod, a [JCP](https://github.com/raydac/java-comment-preprocessor)-inspired preprocessor is used:
+### 条件表达式
+
+- 区间：`X in A..B`，下界包含、上界不包含。上界与下界都接受点分版本字面量
+  ```java
+  //#if MC in 12005..12110
+  ```
+- 集合：`X in [A, B, C]`
+  ```java
+  //#if MC in [11904, 12001, 12105]
+  ```
+- 取反：`not in` 同时支持区间与集合形式
+  ```java
+  //#if MC not in 12005..12110
+  //#if MC not in [11900, 12110]
+  ```
+- 省略主变量：当条件以运算符或数字开头时，变量名可以省去，"主变量"取 `vars` 中的 `MC`；
+  只有一个变量时取该变量；否则裸条件会报错
+  ```java
+  //#if >= 1.21.5              // 等价于 MC >= 1.21.5
+  //?1.21.5 ? same()           // 含点号，等价于 MC == 1.21.5
+  //?1.21.2..1.21.6 ? ranged() // 等价于 MC in 1.21.2..1.21.6
+  ```
+  裸整数不作版本解释：`//#if 0` 仍然是"恒假"，不会变成 `MC == 0`
+- `defined(X)`：判断 `vars` 或 `//#define` 中是否存在 `X`
+  ```java
+  //#if defined(FABRIC) && MC >= 12001
+  //#ifndef NEOFORGE
+  ```
+  `defined(X)` 在展开阶段就求值，因此其中的 `X` 不会被 `//#define` 别名替换掉
+
+### 条件别名 `//#define`
+
+```java
+//#define NEW_API MC >= 12102
+//#define NEW_BOTH NEW_API && FABRIC
+
+//#if NEW_BOTH
+//?NEW_API ? Orientation orientation,
+//#replace NEW_API ? Orientation orientation,
+//#endif
+```
+
+别名是文件级的，并且会先扫描全文再处理，因此可以写在定义之前。别名之间可以互相引用，
+展开时自动加括号以保持优先级。重复定义且条件不同会报错。与 `vars` 同名时别名优先。
+
+### 行尾条件替换 `//#replace`
+
+重写自身所在行，条件是行尾注释的一部分：
+
+```java
+super.neighborChanged(blockState, level, blockPos, block, blockPos2, bl); //#replace >= 1.21.2 ? super.neighborChanged(blockState, level, blockPos, block, orientation, bl);
+```
+
+条件成立时整行替换为 `?` 之后的内容，不成立时保留 `?` 之前的原行并去掉指令。
+`import` 开头的行会自动补上 `import ` 与结尾的 `;`。
+替换内容留空表示删除该行（位置保留为空行，行数不变）。
+
+由于两趟处理都会遇到同一行，被注释的形态会连同指令一起保留，使得重复处理结果稳定：
+
+```text
+条件不成立时 -> //$$ super.neighborChanged(...blockPos2...); //#replace >= 1.21.2 ? ...
+```
+
+### 整行候选组 `//#case`
+
+```java
+//#case
+//?MC >= 12111 ? int x = 3;
+//?MC >= 12110 ? int x = 2;
+//?else ? int x = 1;
+//#endcase
+```
+
+- `//?<条件> ? <内容>`：条件成立时去掉前缀变为真代码，不成立时整行保持注释
+- `//?else ? <内容>`：显式默认分支，总是生效，满足"必须有分支命中"的检查
+- `//#case optional`：允许整组一个分支都不命中
+- 默认情况下，组内有分支但全不命中会报错
+- `//?` 只能在 `//#case` 与 `//#endcase` 之间使用
+- `//#case` 与 `//#endcase` 在产物中保留为注释，因为预处理会跑两趟
+
+行尾形式用于"这一行只在条件成立时保留"：
+
+```java
+null, //?> 1.20.1
+```
+
+### 行内候选组 `/*#case*/`
+
+在一行内的任意位置重写紧跟在标记之后的代码：
+
+```java
+register(/*#case*/ Old.class /*?MC >= 12111 ? New.class *//*?MC >= 12110 ? Mid.class */);
+```
+
+条件按降序书写，首个成立者生效，命中之后不再评估后续块，全部不成立时保留基线代码。
+基线是真实代码（IDE 可以解析与跳转），指令是块注释（IDE 忽略），行数不变。
+候选顺序写反（被跳过的块其实也成立）时会输出警告但不中断构建。
+
+### 多行注释块 `/*$$ ... $$*/`
+
+```java
+//#if >= 1.21.11
+/*$$
+int a = 1;
+int b = 2;
+$$*/
+//#endif
+```
+
+块内每行不需要 `//$$` 前缀。分支生效时两个标记行变为空行、块内成为真实代码；
+分支不生效时整块就是一个普通的 Java 块注释。
+
+### 构建期诊断 `//#error` 与 `//#warn`
+
+```java
+//#if >= 1.21.5
+//#error MC 1.21.5 changed this signature, see issue #42
+//#endif
+```
+
+只在其所在分支生效时触发。`//#error` 抛出异常中断构建，`//#warn` 仅打印到 stderr。
+
+### 已移除
+
+- `//#import`：已在条件块内直接写 `//?<条件> ? import <全限定名>;` 取代。
+  指令本身是一行注释，IDE 看不到它，因此现在用行首 `//?` 在导入段条件化导入：
+  ```java
+  //?MC >= 12110 ? import fi.dy.masa.malilib.render.InventoryOverlayContext;
+  ```
+- `//#swapwhen`：改名为 `//#replace`
+
+## 上游文档
+
+### 预处理器
+
+为支持多个 Minecraft 版本，ReplayMod 使用了一个受
+[JCP](https://github.com/raydac/java-comment-preprocessor) 启发的预处理器：
+
 ```java
         //#if MC>=11200
-        // This is the block for MC >= 1.12.0
+        // 这是 MC >= 1.12.0 的代码块
         category.addDetail(name, callable::call);
         //#else
-        //$$ // This is the block for MC < 1.12.0
+        //$$ // 这是 MC < 1.12.0 的代码块
         //$$ category.setDetail(name, callable::call);
         //#endif
 ```
-Any comments starting with `//$$` will automatically be introduced / removed based on the surrounding condition(s).
-Normal comments are left untouched. The `//#else` branch is optional.
 
-Conditions can be nested arbitrarily but their indention shall always be equal to the indention of the code at the `//#if` line.
-The `//$$` shall be aligned with the inner-most `//#if`.
+任何以 `//$$` 开头的注释都会根据外围条件自动启用或禁用。普通注释保持原样。
+`//#else` 分支是可选的。
+
+条件可以任意嵌套，但缩进必须与 `//#if` 所在行的代码缩进一致。
+`//$$` 需要与最内层的 `//#if` 对齐。
+
 ```java
     //#if MC>=10904
     public CPacketResourcePackStatus makeStatusPacket(String hash, Action action) {
@@ -80,37 +225,44 @@ The `//$$` shall be aligned with the inner-most `//#if`.
     //$$ }
     //#endif
 ```
-Code for the more recent MC version shall be placed in the first branch of the if-else-construct.
-Version-dependent import statements shall be placed separately from and after all other imports but before the `static` and `java.*` imports.
 
-The source code resides in `src/main` (gradle project determined by `versions/mainVersion` e.g. with `11404` it'll be `:1.14.4`) and is automatically passed through the
-preprocessor when any of the other versions are built (gradle projects `:1.8`, `:1.8.9`, etc.).
-Do **NOT** edit any of the code in `versions/$MCVERSION/build/` as it is automatically generated and will be overwritten without warning.
+较新 MC 版本的代码应放在 if-else 结构的第一个分支中。
+依赖版本的 import 语句应独立于其它 import 之后、`static` 与 `java.*` 导入之前。
 
-You can pass the original source code through the preprocessor if you wish to develop/debug with another version of Minecraft:
+源代码位于 `src/main`（具体 Gradle 项目由 `versions/mainVersion` 决定，例如 `11404` 对应 `:1.14.4`），
+在构建其它版本时（Gradle 项目 `:1.8`、`:1.8.9` 等）会自动经过预处理器。
+**不要**编辑 `versions/$MCVERSION/build/` 下的任何代码，它们是自动生成的，会被无提示地覆盖。
+
+如果你想用另一个 Minecraft 版本开发或调试，可以把原始源码过一遍预处理器：
+
 ```bash
-./gradle :1.9.4:setCoreVersion # switches all sources in src/main to 1.9.4
+./gradle :1.9.4:setCoreVersion # 把 src/main 下的所有源码切换到 1.9.4
 ```
 
-Make sure to switch back to the most recent branch before committing!
-Care should also be taken that switching to a different branch and back doesn't introduce any uncommitted changes (e.g. due to different indention, especially in case of nested conditions).
+提交之前记得切回最新的分支。
+切换到另一个分支再切回来时，要注意不要引入未提交的改动（例如由于缩进不同，嵌套条件尤其容易出问题）。
 
-The `replaymod_at.cfg` file uses the same preprocessor but with different keywords (see already existent examples in that file).
-If required, more file extensions and keywords can be added to the implementation.
+`replaymod_at.cfg` 文件使用同一个预处理器，但关键字不同（参见该文件中已有的例子）。
+如有需要，可以在实现中加入更多的文件扩展名与关键字。
 
-## Per-version files
+## 按版本覆盖的文件
 
-If entire files are very version specific, they may be overwritten for any version by placing a new file with the same package and name in `versions/$MCVERSION/src/main/java` (or the respective source set / language folder).
-If such a file is present, the overwritten file will no longer be derived from another version and any downstream versions will be derived from the new file instead.
-This also has the huge advantage that the file may be edited with full IDE support because it is actually part of the respective version's Gradle project.
+如果整个文件都是版本相关的，可以在 `versions/$MCVERSION/src/main/java`（或对应的源集与语言目录）
+放置同包同名的文件来为某个版本覆盖它。
+一旦存在这样的文件，被覆盖的文件不再由其它版本派生，而下游版本将改为派生自这个新文件。
+这还有个很大的好处：该文件是相应版本 Gradle 项目的一部分，因此可以用完整的 IDE 支持来编辑。
 
-This feature is fully compatible with `setCoreVersion` and overwrite files will be moved generated/removed as required such that switching back and forth leaves the same result as you started out with.
-The core project itself does not allow for overwrites and any present in its folder will be deleted on `setCoreVersion`.
+该特性与 `setCoreVersion` 完全兼容，覆盖文件会被按需生成或删除，来回切换的结果与初始状态一致。
+core 项目本身不允许覆盖，其目录中若存在覆盖文件，会在 `setCoreVersion` 时被删除。
 
 ## Patterns
 
-The preprocessor also supports defining simple "search and replace"-like patterns (but smarter in that they are type-aware) annotated by a `@Pattern` annotation in one or more central places which then are applied all over the code base.
-This allows code which would previously have to be written with preprocessor statements or as `MCVer.getWindow(mc)` all over the code base to instead now use the much more intuitive `mc.getWindow()` and be automatically converted to `mc.window` (or even a Window stub object) on remap if a pattern for that exists anywhere in the same source tree:
+预处理器还支持定义简单的"查找与替换"式 pattern（更聪明的地方在于它是类型感知的），
+通过 `@Pattern` 注解在一处或多处中心位置声明，然后应用到整个代码库。
+这让原本必须写成预处理语句、或到处写成 `MCVer.getWindow(mc)` 的代码，现在可以直接写
+`mc.getWindow()`，并在重映射时（若同一源码树中存在对应 pattern）自动转换为
+`mc.window`（甚至是一个 Window 桩对象）：
+
 ```java
     @Pattern
     private static Window getWindow(MinecraftClient mc) {
@@ -123,24 +275,29 @@ This allows code which would previously have to be written with preprocessor sta
         //#endif
     }
 ```
-All pattern cases should be a single line as to not mess with indentation and/or line count.
-Any arguments passed to the pattern must be used in the pattern in the same order in every case (introducing in-line locals to work around that is fine).
-Defining and/or applying patterns in/on Kotlin code is not yet supported.
 
-To use this feature, you must create a `Pattern` (name may be different) annotation in your mod:
+所有 pattern 分支都应为单行，以免打乱缩进或行数。
+传给 pattern 的参数在每个分支中必须按相同顺序使用（用行内局部变量绕开这一限制也可以）。
+暂不支持在 Kotlin 代码中定义或应用 pattern。
+
+要使用该特性，需要在你的模组中创建一个 `Pattern` 注解（名字可以不同）：
+
 ```java
 @Retention(RetentionPolicy.SOURCE)
 @Target(ElementType.METHOD)
 public @interface Pattern {
 }
 ```
-and then declare it in your `build.gradle`:
+
+然后在 `build.gradle` 中声明它：
+
 ```groovy
 preprocess {
     patternAnnotation.set("com.replaymod.gradle.remap.Pattern")
 }
 ```
 
-## License
-The Preprocessor is provided under the terms of the GNU General Public License Version 3 or (at your option) any later version.
-See `LICENSE.md` for the full license text.
+## 许可证
+
+本预处理器按 GNU 通用公共许可证第 3 版或其后续版本（由你选择）的条款提供。
+完整许可证文本见 `LICENSE.md`。
