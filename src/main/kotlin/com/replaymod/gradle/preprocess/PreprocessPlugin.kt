@@ -137,7 +137,14 @@ class PreprocessPlugin : Plugin<Any> {
                 val preprocessCode = project.tasks.register<PreprocessTask>("preprocess${cName}Code") {
                     inherited.tasks.findByPath("preprocess${cName}Code")?.let { dependsOn(it) }
                     entry(
-                        source = inherited.files(inheritedSourceSet.java.srcDirs),
+                        source = inherited.files(
+                            // A source set may reach into the build directory. Feeding the preprocessed output back
+                            // in as an input would make every run re-process its own result, which corrupts lines
+                            // that were commented out by a directive.
+                            inheritedSourceSet.java.srcDirs.filter { dir ->
+                                !dir.absolutePath.replace('\\', '/').contains("/build/preprocessed")
+                            }
+                        ),
                         overwrites = overwritesJava,
                         generated = generatedJava.get().asFile,
                     )

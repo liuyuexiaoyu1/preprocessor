@@ -1527,6 +1527,7 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         val string = inFile.readText()
         var lines = string.lines()
         val remapped = remap?.invoke(lines) ?: lines.map { Pair(it, emptyList()) }
+        dump(inFile.name + ".path.txt", inFile.absolutePath)
         dump(inFile.name + ".source.txt", string)
         dump(
             inFile.name + ".secondpass.txt",
