@@ -1374,8 +1374,11 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                         if (inCase) caseMatched = true
                         code.trimEnd()
                     } else {
-                        val indent = line.takeWhile { it == ' ' || it == '\t' }
-                        indent + kws.eval + " " + code.trimStart()
+                        // Wrapped in a block comment instead of prefixed with `eval`: the preprocessor runs over
+                        // its own (remapped) output a second time, and a prefix added here sits inside an active
+                        // branch by then, so that pass would strip it again and the line would come back as live
+                        // code. A `/* */` wrapper survives reprocessing.
+                        line.indentation + "/*" + code.trim() + "*/"
                     }
                 }
             } else {
