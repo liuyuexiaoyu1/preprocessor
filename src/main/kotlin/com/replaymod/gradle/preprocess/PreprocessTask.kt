@@ -1393,7 +1393,11 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                         else -> indent + replacement
                     }
                 } else {
-                    base.trimEnd()
+                    // Keep the directive. A version in the middle of the inheritance chain evaluates the
+                    // condition with *its own* MC and, dropping the directive here, would consume it before
+                    // the version it was written for ever sees the source. Re-emitting the line verbatim is a
+                    // fixed point, so the extra pass changes nothing.
+                    base.trimEnd() + " " + kws.replace + " " + directive
                 }
             } else if (trailingCaseAt >= 0 && active) {
                 val code = trailingBase.substring(0, trailingCaseAt)
@@ -1412,17 +1416,26 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     }
                     if (matches) {
                         if (inCase) caseMatched = true
-                        code.trimEnd()
-                    } else if (finalPass) {
+                        // Same reasoning as the `//#replace` branch: keep the directive so a version further
+                        // down the chain still gets to evaluate it against its own MC.
+                        code.trimEnd() + " " + kws.caseBranch + " " + condition
+                    } else {
                         // Prefix with `eval` but keep the directive itself, so the line reaches the same state on
                         // every pass: the next pass strips the prefix, lands here again and re-applies it, which
                         // makes this a fixed point. Dropping the directive would let the line come back as live
                         // code on that pass, and wrapping it in `/* */` does not survive either, because the
-                        // remapper treats a standalone block comment as trivia.
+                        // remapper treats a standalone block comment as trivia. Doing it on the remapper pass as
+                        // well is what makes the comment actually reach the compiler - deferring it to the final
+                        // pass left the directive sitting on live code, and the compiler saw a version specific
+                        // import that does not exist.
                         val base = trailingBase
-                        base.indentation + kws.eval + " " + base.substring(base.indentation.length)
-                    } else {
-                        trailingBase
+                        if (base.trimStart().startsWith(kws.eval)) {
+                            // Already carrying the prefix from an earlier version in the chain: adding a second
+                            // one would grow the line on every pass instead of settling.
+                            base.trimEnd()
+                        } else {
+                            base.indentation + kws.eval + " " + base.substring(base.indentation.length)
+                        }
                     }
                 }
             } else {
@@ -1557,12 +1570,36 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
     fun convertFile(kws: Keywords, inFile: File, outFile: File, remap: ((List<String>) -> List<Pair<String, List<String>>>)? = null) {
         val string = inFile.readText()
         var lines = string.lines()
-        val remapped = remap?.invoke(lines) ?: lines.map { Pair(it, emptyList()) }
+        // The remapper round-trips every line through javaparser, which re-attaches or drops trailing
+        // comments. A trailing directive (`//#replace ...` / `//?cond`) therefore never reached
+        // convertSource, and the code it was meant to exclude stayed live. Lift the directives out of the
+        // remapper's input and put them back afterwards, index for index, so the line the conversion sees
+        // is the line that was written.
+        val directiveAt = lines.map { trailingDirectiveAt(it, kws) }
+        val remapInput = if (remap != null && directiveAt.any { it > 0 }) {
+            lines.mapIndexed { index, line -> if (directiveAt[index] > 0) line.substring(0, directiveAt[index]) else line }
+        } else {
+            lines
+        }
+        val remappedRaw = remap?.invoke(remapInput) ?: remapInput.map { Pair(it, emptyList()) }
+        val remapped = if (remap != null && remappedRaw.size == lines.size) {
+            remappedRaw.mapIndexed { index, pair ->
+                val at = directiveAt[index]
+                if (at <= 0) return@mapIndexed pair
+                // The remapper keeps a trailing comment on some lines and drops it on others, so strip
+                // whatever it left behind before restoring the directive: appending blindly doubled it.
+                val kept = trailingDirectiveAt(pair.first, kws)
+                val code = if (kept > 0) pair.first.substring(0, kept) else pair.first
+                Pair(code.trimEnd() + " " + lines[index].substring(at), pair.second)
+            }
+        } else {
+            remappedRaw
+        }
         dump(inFile.name + ".path.txt", inFile.absolutePath)
         dump(inFile.name + ".source.txt", string)
         dump(
             inFile.name + ".secondpass.txt",
-            remapped.mapIndexed { index, pair -> "${index + 1}: ${pair.first}" }.joinToString("\n")
+            remappedRaw.mapIndexed { index, pair -> "${index + 1}: ${pair.first}" }.joinToString("\n")
         )
         try {
             lines = convertSource(kws, lines, remapped, inFile.path)
@@ -1574,6 +1611,17 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         }
         outFile.parentFile.mkdirs()
         outFile.writeText(lines.joinToString("\n"))
+    }
+
+    /**
+     * Index at which a trailing directive starts, or -1 when the line carries none. A line that *begins*
+     * with a directive is a block directive (`//#replace` / `//#case` branch) and is handled on its own,
+     * so only a directive preceded by actual code counts as trailing.
+     */
+    private fun trailingDirectiveAt(line: String, kws: Keywords): Int {
+        val at = listOf(line.indexOf(kws.replace), line.indexOf(kws.caseBranch)).filter { it > 0 }.minOrNull()
+            ?: return -1
+        return if (line.substring(0, at).isBlank()) -1 else at
     }
 
     data class IfStackEntry(

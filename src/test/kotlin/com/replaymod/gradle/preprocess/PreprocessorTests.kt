@@ -16,6 +16,16 @@ class PreprocessorTests : FunSpec({
         // Present so the bare-condition shorthand has a primary variable to fall back on.
         "MC" to 12105
     )
+    with(CommentPreprocessor(mapOf("MC" to 12004))) {
+        test("bare version shorthand against an older MC") {
+            ">= 1.20.5".evalExpr().shouldBeFalse()
+            "> 1.20.5".evalExpr().shouldBeFalse()
+            ">= 1.20.4".evalExpr().shouldBeTrue()
+            "< 1.20.5".evalExpr().shouldBeTrue()
+            "12004".evalExpr().shouldBeTrue()
+            "1.20.5".evalExpr().shouldBeFalse()
+        }
+    }
     with(CommentPreprocessor(vars)) {
         context("evalExpr") {
             test("c-style truthiness of variables") {
@@ -224,8 +234,9 @@ class PreprocessorTests : FunSpec({
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
-                outLines.contains("import com.example.a.Old;") shouldBe true
-                outLines.none { it.contains("replace") } shouldBe true
+                outLines.any { it.startsWith("import com.example.a.Old;") } shouldBe true
+                // The directive stays on the line so a version further down the chain still sees it.
+                outLines.any { it.contains("//#replace f ?") } shouldBe true
             }
             test("replace also applies to code lines") {
                 val out = "class C {\n    int x = 1; //#replace t ? int x = 2;\n}".convert()
@@ -438,7 +449,7 @@ class PreprocessorTests : FunSpec({
             }
             test("trailing case condition keeps the line when it holds") {
                 val out = "//#case\nclass C {\n    int a = 1; //?t\n}\n//#endcase".convert()
-                out.lines().map { it.trim() }.contains("int a = 1;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("int a = 1;") } shouldBe true
             }
             test("throws when no branch in a case group matches (trailing form)") {
                 shouldThrow<CommentPreprocessor.ParserException> {
@@ -460,7 +471,7 @@ class PreprocessorTests : FunSpec({
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
-                outLines.contains("int a = 1;") shouldBe true
+                outLines.any { it.startsWith("int a = 1;") } shouldBe true
                 outLines.contains("//?t ? int b = 2;") shouldBe true
                 outLines.none { it == "int b = 2;" } shouldBe true
             }
@@ -477,7 +488,7 @@ class PreprocessorTests : FunSpec({
             }
             test("standalone trailing //? acts like a single-line //#if") {
                 val out = "class C {\n    int a = 1; //?t\n}".convert()
-                out.lines().map { it.trim() }.contains("int a = 1;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("int a = 1;") } shouldBe true
                 val out2 = "class C {\n    int a = 1; //?f\n}".convert()
                 out2.lines().map { it.trim() }.any {
                     it.startsWith("//$$") && it.contains("int a = 1;") && it.contains("//?f")
@@ -731,7 +742,7 @@ class PreprocessorTests : FunSpec({
             }
             test("an empty replacement keeps the line when the condition fails") {
                 val out = "class C {\n    int x = 1; //#replace f ?\n}".convert()
-                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("int x = 1;") } shouldBe true
             }
             test("an empty case branch content clears the line") {
                 val src = "//#case\n//?t ?\n//#endcase\nclass C {}"
