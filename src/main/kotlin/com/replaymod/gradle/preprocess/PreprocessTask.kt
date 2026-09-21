@@ -1374,11 +1374,12 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                         if (inCase) caseMatched = true
                         code.trimEnd()
                     } else {
-                        // Wrapped in a block comment instead of prefixed with `eval`: the preprocessor runs over
-                        // its own (remapped) output a second time, and a prefix added here sits inside an active
-                        // branch by then, so that pass would strip it again and the line would come back as live
-                        // code. A `/* */` wrapper survives reprocessing.
-                        line.indentation + "/*" + code.trim() + "*/"
+                        // Prefix with `eval` but keep the directive itself, so the line reaches the same state on
+                        // every pass: the second pass strips the prefix and then lands here again and re-applies
+                        // it. Dropping the directive would make the line come back as live code on that pass, and
+                        // wrapping it in `/* */` does not survive either, because the remapper treats a standalone
+                        // block comment as trivia.
+                        line.indentation + kws.eval + " " + line.substring(line.indentation.length)
                     }
                 }
             } else {

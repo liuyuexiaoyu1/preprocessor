@@ -480,7 +480,7 @@ class PreprocessorTests : FunSpec({
                 out.lines().map { it.trim() }.contains("int a = 1;") shouldBe true
                 val out2 = "class C {\n    int a = 1; //?f\n}".convert()
                 out2.lines().map { it.trim() }.any {
-                    it.startsWith("/*") && it.endsWith("*/") && it.contains("int a = 1;")
+                    it.startsWith("//$$") && it.contains("int a = 1;") && it.contains("//?f")
                 } shouldBe true
             }
             test("only the first matching alternative in a case group is activated") {
