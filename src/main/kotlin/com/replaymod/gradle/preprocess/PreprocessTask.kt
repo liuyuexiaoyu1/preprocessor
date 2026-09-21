@@ -1324,7 +1324,12 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 }
             }
             val swapAt = line.indexOf(kws.replace)
-            val trailingCaseAt = if (trimmed.startsWith(kws.caseBranch)) -1 else line.indexOf(kws.caseBranch)
+            // The trailing directive is resolved against `mapped`, i.e. against the line as this pass will emit
+            // it. An earlier pass may already have prefixed the line with `eval`; resolving against `line` would
+            // then stack a second prefix (or lose the directive altogether), so the two passes would never
+            // converge on the same output.
+            val trailingBase = if (trimmed.startsWith(kws.caseBranch)) "" else mapped
+            val trailingCaseAt = trailingBase.indexOf(kws.caseBranch)
 
             val outLine = if (swapAt >= 0 && active) {
                 val base = line.substring(0, swapAt)
@@ -1356,14 +1361,14 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     base.trimEnd()
                 }
             } else if (trailingCaseAt >= 0 && active) {
-                val code = line.substring(0, trailingCaseAt)
-                val condition = line.substring(trailingCaseAt + kws.caseBranch.length).trim()
+                val code = trailingBase.substring(0, trailingCaseAt)
+                val condition = trailingBase.substring(trailingCaseAt + kws.caseBranch.length).trim()
                 if (condition.isEmpty()) {
                     throw ParserException("Expected a condition after ${kws.caseBranch} in line $n of ${fileName}")
                 }
                 if (inCase) caseHadAnyBranch = true
                 if (inCase && caseMatched) {
-                    line
+                    trailingBase
                 } else {
                     val matches = try {
                         condition.evalExpr()
@@ -1375,11 +1380,12 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                         code.trimEnd()
                     } else {
                         // Prefix with `eval` but keep the directive itself, so the line reaches the same state on
-                        // every pass: the second pass strips the prefix and then lands here again and re-applies
-                        // it. Dropping the directive would make the line come back as live code on that pass, and
-                        // wrapping it in `/* */` does not survive either, because the remapper treats a standalone
-                        // block comment as trivia.
-                        line.indentation + kws.eval + " " + line.substring(line.indentation.length)
+                        // every pass: the next pass strips the prefix, lands here again and re-applies it, which
+                        // makes this a fixed point. Dropping the directive would let the line come back as live
+                        // code on that pass, and wrapping it in `/* */` does not survive either, because the
+                        // remapper treats a standalone block comment as trivia.
+                        val base = trailingBase
+                        base.indentation + kws.eval + " " + base.substring(base.indentation.length)
                     }
                 }
             } else {
