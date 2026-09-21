@@ -1126,17 +1126,29 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 val endIdx = line.indexOf(kws.blockEnd)
                 if (endIdx >= 0) {
                     inBlockComment = false
-                    if (active) line.substring(0, endIdx).trimEnd() else line
+                    when {
+                        active -> line.substring(0, endIdx).trimEnd()
+                        // The pass that feeds the remapper must not hand it a block comment: the remapper attaches
+                        // comments to the syntax node that follows them, so a multi-line comment in the middle of a
+                        // class reattaches elsewhere and the code it used to hide comes back. Emit plain per-line
+                        // comments instead and leave the block form to the final pass.
+                        !finalPass -> line.indentation + kws.eval + " " + line.substring(0, endIdx).trim()
+                        else -> line
+                    }
                 } else {
-                    line
+                    if (!active && !finalPass) {
+                        line.indentation + kws.eval + " " + line.trim()
+                    } else {
+                        line
+                    }
                 }
             } else if (trimmed.startsWith(kws.blockStart)) {
                 inBlockComment = true
-                if (active) {
-                    val after = trimmed.substring(kws.blockStart.length).trimStart()
-                    if (after.isEmpty()) "" else line.takeWhile { it == ' ' || it == '\t' } + after
-                } else {
-                    line
+                val after = trimmed.substring(kws.blockStart.length).trimStart()
+                when {
+                    active -> if (after.isEmpty()) "" else line.takeWhile { it == ' ' || it == '\t' } + after
+                    !finalPass -> line.indentation + kws.eval + " " + after
+                    else -> line
                 }
             } else if (trimmed.startsWith(kws.define)) {
                 // Already collected by collectDefinitions; the line is kept so a second pass still sees it.
