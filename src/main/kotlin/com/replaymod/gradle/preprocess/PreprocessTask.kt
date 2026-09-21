@@ -370,27 +370,6 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                     Entry(relPath.toString(), inBasePath, outBasePath, overwritesBasePath)
                 }
             }
-        }.let { all ->
-            // A version inherits the source set of its parent, which includes that parent's preprocessed output. For
-            // a file that exists in both the shared sources and such an inherited build directory, only the shared
-            // source may be used: the inherited copy has already been through a pass, so its directives are half
-            // consumed and running them again brings commented-out lines back as live code. Keep one entry per
-            // relative path and output directory, preferring the one that does not come from a build directory.
-            fun fromBuild(entry: Entry): Boolean =
-                entry.inBase.toAbsolutePath().toString().replace('\\', '/').contains("/build/")
-
-            val byKey = LinkedHashMap<Pair<Path, String>, Entry>()
-            for (entry in all) {
-                val key = Pair(entry.outBase, entry.relPath)
-                val previous = byKey[key]
-                if (previous == null || (fromBuild(previous) && !fromBuild(entry))) {
-                    byKey[key] = entry
-                }
-            }
-            // Drop inherited copies of anything a real source also provides: those have already been through a pass,
-            // so their directives are half consumed and re-running them turns commented-out lines back into code.
-            val providedBySource = all.filterNot { fromBuild(it) }.map { it.relPath }.toSet()
-            byKey.values.filterNot { fromBuild(it) && it.relPath in providedBySource }
         }
 
         System.getenv("PREPROCESS_DUMP_DIR")?.let { dir ->

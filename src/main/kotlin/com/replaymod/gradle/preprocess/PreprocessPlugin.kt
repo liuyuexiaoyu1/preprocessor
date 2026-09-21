@@ -137,13 +137,7 @@ class PreprocessPlugin : Plugin<Any> {
                 val preprocessCode = project.tasks.register<PreprocessTask>("preprocess${cName}Code") {
                     inherited.tasks.findByPath("preprocess${cName}Code")?.let { dependsOn(it) }
                     entry(
-                        source = inherited.files(
-                            inheritedSourceSet.java.srcDirs,
-                            // Every version also needs the shared sources. Inheriting only the parent's preprocessed
-                            // output means the same file gets processed once per version in the chain, and a
-                            // directive already consumed by the parent's version is gone by the time we see it.
-                            project.rootProject.file("src/main/java"),
-                        ),
+                        source = inherited.files(inheritedSourceSet.java.srcDirs),
                         overwrites = overwritesJava,
                         generated = generatedJava.get().asFile,
                     )
