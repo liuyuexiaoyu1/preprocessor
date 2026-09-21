@@ -1099,6 +1099,12 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             var ignoreErrors = false
             n++
             val trimmed = line.trim()
+            // A line carrying a *trailing* `//?` is kept out of the remapper entirely and emitted as plain source
+            // text. Such a line changes shape between passes, and the remapper re-attaches comments to whatever
+            // syntax node follows them, which moves or drops the prefix this pass relies on - inside a class body
+            // that turned the line back into live code. Feeding the original line through leaves the directive
+            // exactly where it was written.
+            val trailingCaseLine = !trimmed.startsWith(kws.caseBranch) && line.indexOf(kws.caseBranch) >= 0
             val mapped = if (inBlockComment) {
                 val endIdx = line.indexOf(kws.blockEnd)
                 if (endIdx >= 0) {
@@ -1299,7 +1305,7 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                         line.replaceFirst((Pattern.quote(kws.eval) + " ?").toRegex(), "").let {
                             if (it.trim().isEmpty()) "" else it
                         }
-                    } else if (remapActive) {
+                    } else if (remapActive && !trailingCaseLine) {
                         line
                     } else {
                         ignoreErrors = true
