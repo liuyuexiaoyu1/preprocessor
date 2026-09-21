@@ -1,14 +1,14 @@
-预处理器（增强 Fork）
-========================
+预处理器
+========
+
+为支持多个 Minecraft 版本而使用的、受 [JCP](https://github.com/raydac/java-comment-preprocessor) 启发的预处理器。
 
 本仓库基于 [ReplayMod/preprocessor](https://github.com/ReplayMod/preprocessor) 与
 [Fallen-Breath/preprocessor](https://github.com/Fallen-Breath/preprocessor)。
 
 English documentation: [README_en.md](README_en.md)
 
-## 本 Fork 的改动
-
-### 构建与集成
+## 改动列表
 
 - 支持自动 tab 缩进
 - 新增 `mainProjectFile` 与 `mainProjectFileRel`，子项目布局更灵活
@@ -21,8 +21,8 @@ English documentation: [README_en.md](README_en.md)
     mainProjectFileRel = "../../mainProject"
   }
   ```
-- 以当前 core 项目（在 `mainProject` 文件中定义）的节点作为图的根节点，切换并编译子项目时
-  减少编译量。注意：对根项目的任务不生效
+- 以当前 core 项目（在 `mainProject` 文件中定义）的节点作为图的根节点，切换并编译子项目时减少编译量。
+  注意：对根项目的任务不生效
 - "Missing endif" 报错附带行号提示
 - `//#if` 中使用未定义变量时给出更清晰的报错
 - 使用 architectury loom 时改进 srg 映射模式的探测
@@ -33,7 +33,8 @@ English documentation: [README_en.md](README_en.md)
 - 兼容 Gradle 9 的配置缓存
   - 任务字段不再持有 `Configuration` 或 `Project`，它们都会让任务状态存储阶段的配置缓存失败
   - `preprocessCode` 的跨项目 classpath 不再触发"未持有独占锁就解析另一个项目的配置"错误
-- 允许在 `settings.gradle(.kts)` 中声明预处理图（[#26](https://github.com/ReplayMod/preprocessor/issues/26)）
+- 允许在 `settings.gradle(.kts)` 中声明预处理图
+  （[#26](https://github.com/ReplayMod/preprocessor/issues/26)）
   ```kotlin
   // settings.gradle.kts
   plugins { id("com.replaymod.preprocess") version "<version>" }
@@ -50,149 +51,17 @@ English documentation: [README_en.md](README_en.md)
   ```
   图会与各个项目共享，因此已有的 `build.gradle(.kts)` 配置无需改动即可继续工作
 - 严格化 `//#else`（[#13](https://github.com/ReplayMod/preprocessor/issues/13)）
-  - `//#else` 之后的内容（例如把 `//#elseif` 误写成 `//#else#if MC>=12000`）
-    会被拒绝，同一个 `//#if` 出现第二个 `//#else` 同样会被拒绝
-- 修复 `//#ifdef`：此前它会被 `//#if` 抢先匹配，条件被解析成 `def <变量名>` 而报错，实际从未生效
+  - `//#else` 之后的内容（例如把 `//#elseif` 误写成 `//#else#if MC>=12000`）会被拒绝，
+    同一个 `//#if` 出现第二个 `//#else` 同样会被拒绝
 - 条件表达式报错时附带当前变量取值，例如
   `Invalid condition "MC >= 12105" in line 12 of Foo.java (vars: MC=12105, FABRIC=1)`
+- 移除 `//#import`，改用行首 `//?` 条件化导入
+- `//#swapwhen` 改名为 `//#replace`
+- 新增以下指令与条件写法，详见下文：`//#replace`、`//#case`、`//?`、`//?else`、
+  `/*#case*/`、`/*$$ ... $$*/`、`//#define`、`//#error`、`//#warn`、`//#ifndef`、
+  区间 `X in A..B`、集合 `X in [A, B]`、`not in`、`defined(X)`、省略主变量的裸条件
 
-### 条件表达式
-
-- 区间：`X in A..B`，下界包含、上界不包含。上界与下界都接受点分版本字面量
-  ```java
-  //#if MC in 12005..12110
-  ```
-- 集合：`X in [A, B, C]`
-  ```java
-  //#if MC in [11904, 12001, 12105]
-  ```
-- 取反：`not in` 同时支持区间与集合形式
-  ```java
-  //#if MC not in 12005..12110
-  //#if MC not in [11900, 12110]
-  ```
-- 省略主变量：当条件以运算符或数字开头时，变量名可以省去，"主变量"取 `vars` 中的 `MC`；
-  只有一个变量时取该变量；否则裸条件会报错
-  ```java
-  //#if >= 1.21.5              // 等价于 MC >= 1.21.5
-  //?1.21.5 ? same()           // 含点号，等价于 MC == 1.21.5
-  //?1.21.2..1.21.6 ? ranged() // 等价于 MC in 1.21.2..1.21.6
-  ```
-  裸整数不作版本解释：`//#if 0` 仍然是"恒假"，不会变成 `MC == 0`
-- `defined(X)`：判断 `vars` 或 `//#define` 中是否存在 `X`
-  ```java
-  //#if defined(FABRIC) && MC >= 12001
-  //#ifndef NEOFORGE
-  ```
-  `defined(X)` 在展开阶段就求值，因此其中的 `X` 不会被 `//#define` 别名替换掉
-
-### 条件别名 `//#define`
-
-```java
-//#define NEW_API MC >= 12102
-//#define NEW_BOTH NEW_API && FABRIC
-
-//#if NEW_BOTH
-//?NEW_API ? Orientation orientation,
-//#replace NEW_API ? Orientation orientation,
-//#endif
-```
-
-别名是文件级的，并且会先扫描全文再处理，因此可以写在定义之前。别名之间可以互相引用，
-展开时自动加括号以保持优先级。重复定义且条件不同会报错。与 `vars` 同名时别名优先。
-
-### 行尾条件替换 `//#replace`
-
-重写自身所在行，条件是行尾注释的一部分：
-
-```java
-super.neighborChanged(blockState, level, blockPos, block, blockPos2, bl); //#replace >= 1.21.2 ? super.neighborChanged(blockState, level, blockPos, block, orientation, bl);
-```
-
-条件成立时整行替换为 `?` 之后的内容，不成立时保留 `?` 之前的原行并去掉指令。
-`import` 开头的行会自动补上 `import ` 与结尾的 `;`。
-替换内容留空表示删除该行（位置保留为空行，行数不变）。
-
-由于两趟处理都会遇到同一行，被注释的形态会连同指令一起保留，使得重复处理结果稳定：
-
-```text
-条件不成立时 -> //$$ super.neighborChanged(...blockPos2...); //#replace >= 1.21.2 ? ...
-```
-
-### 整行候选组 `//#case`
-
-```java
-//#case
-//?MC >= 12111 ? int x = 3;
-//?MC >= 12110 ? int x = 2;
-//?else ? int x = 1;
-//#endcase
-```
-
-- `//?<条件> ? <内容>`：条件成立时去掉前缀变为真代码，不成立时整行保持注释
-- `//?else ? <内容>`：显式默认分支，总是生效，满足"必须有分支命中"的检查
-- `//#case optional`：允许整组一个分支都不命中
-- 默认情况下，组内有分支但全不命中会报错
-- `//?` 只能在 `//#case` 与 `//#endcase` 之间使用
-- `//#case` 与 `//#endcase` 在产物中保留为注释，因为预处理会跑两趟
-
-行尾形式用于"这一行只在条件成立时保留"：
-
-```java
-null, //?> 1.20.1
-```
-
-### 行内候选组 `/*#case*/`
-
-在一行内的任意位置重写紧跟在标记之后的代码：
-
-```java
-register(/*#case*/ Old.class /*?MC >= 12111 ? New.class *//*?MC >= 12110 ? Mid.class */);
-```
-
-条件按降序书写，首个成立者生效，命中之后不再评估后续块，全部不成立时保留基线代码。
-基线是真实代码（IDE 可以解析与跳转），指令是块注释（IDE 忽略），行数不变。
-候选顺序写反（被跳过的块其实也成立）时会输出警告但不中断构建。
-
-### 多行注释块 `/*$$ ... $$*/`
-
-```java
-//#if >= 1.21.11
-/*$$
-int a = 1;
-int b = 2;
-$$*/
-//#endif
-```
-
-块内每行不需要 `//$$` 前缀。分支生效时两个标记行变为空行、块内成为真实代码；
-分支不生效时整块就是一个普通的 Java 块注释。
-
-### 构建期诊断 `//#error` 与 `//#warn`
-
-```java
-//#if >= 1.21.5
-//#error MC 1.21.5 changed this signature, see issue #42
-//#endif
-```
-
-只在其所在分支生效时触发。`//#error` 抛出异常中断构建，`//#warn` 仅打印到 stderr。
-
-### 已移除
-
-- `//#import`：已在条件块内直接写 `//?<条件> ? import <全限定名>;` 取代。
-  指令本身是一行注释，IDE 看不到它，因此现在用行首 `//?` 在导入段条件化导入：
-  ```java
-  //?MC >= 12110 ? import fi.dy.masa.malilib.render.InventoryOverlayContext;
-  ```
-- `//#swapwhen`：改名为 `//#replace`
-
-## 上游文档
-
-### 预处理器
-
-为支持多个 Minecraft 版本，ReplayMod 使用了一个受
-[JCP](https://github.com/raydac/java-comment-preprocessor) 启发的预处理器：
+## 基本用法
 
 ```java
         //#if MC>=11200
@@ -227,7 +96,151 @@ $$*/
 ```
 
 较新 MC 版本的代码应放在 if-else 结构的第一个分支中。
-依赖版本的 import 语句应独立于其它 import 之后、`static` 与 `java.*` 导入之前。
+
+`//#ifdef` 与 `//#ifndef` 按变量名是否在 `vars` 中定义来判断分支：
+
+```java
+//#ifdef FABRIC
+//#ifndef NEOFORGE
+```
+
+## 条件表达式
+
+- 比较与逻辑运算：`== != >= <= > <`、`&&`、`||`、`!`、括号
+- 版本字面量：`12105`、`1.21.5` 与带下划线的 `121_05` 都表示同一个值
+- 区间：`X in A..B`，下界包含、上界不包含，两端都接受点分字面量
+  ```java
+  //#if MC in 12005..12110
+  ```
+- 集合：`X in [A, B, C]`
+  ```java
+  //#if MC in [11904, 12001, 12105]
+  ```
+- 取反：`not in`，区间与集合形式都支持
+  ```java
+  //#if MC not in 12005..12110
+  //#if MC not in [11900, 12110]
+  ```
+- 省略主变量：条件以运算符或数字开头时，变量名可以省去。"主变量"取 `vars` 中的 `MC`；
+  只有一个变量时取该变量；否则裸条件会报错
+  ```java
+  //#if >= 1.21.5              // 等价于 MC >= 1.21.5
+  //?1.21.5 ? same()           // 含点号，等价于 MC == 1.21.5
+  //?1.21.2..1.21.6 ? ranged() // 等价于 MC in 1.21.2..1.21.6
+  ```
+  裸整数不作版本解释：`//#if 0` 仍然是"恒假"，不会变成 `MC == 0`
+- `defined(X)`：判断 `X` 是否存在于 `vars` 或 `//#define`
+  ```java
+  //#if defined(FABRIC) && MC >= 12001
+  ```
+  `defined(X)` 在展开阶段就求值，因此其中的 `X` 不会被 `//#define` 别名替换掉
+
+## 条件别名 `//#define`
+
+```java
+//#define NEW_API MC >= 12102
+//#define NEW_BOTH NEW_API && FABRIC
+
+//#if NEW_BOTH
+//?NEW_API ? Orientation orientation,
+//#replace NEW_API ? Orientation orientation,
+//#endif
+```
+
+别名是文件级的，并且会先扫描全文再处理，因此可以写在定义之前。别名之间可以互相引用，
+展开时自动加括号以保持优先级。重复定义且条件不同会报错。与 `vars` 同名时别名优先。
+
+## 条件导入
+
+依赖版本的 import 语句应独立于其它 import 之后、`static` 与 `java.*` 导入之前，
+用行首 `//?` 写在导入段里：
+
+```java
+//?MC >= 12110 ? import fi.dy.masa.malilib.render.InventoryOverlayContext;
+```
+
+条件成立时该行成为真正的 import 语句，不成立时保持注释。相比写在条件块里的指令形式，
+这种写法本身就是导入段的一部分，位置与顺序都由你掌握。
+
+## 行尾替换 `//#replace`
+
+重写自身所在行，条件是行尾注释的一部分：
+
+```java
+super.neighborChanged(blockState, level, blockPos, block, blockPos2, bl); //#replace >= 1.21.2 ? super.neighborChanged(blockState, level, blockPos, block, orientation, bl);
+```
+
+条件成立时整行替换为 `?` 之后的内容，不成立时保留 `?` 之前的原行并去掉指令。
+`import` 开头的行会自动补上 `import ` 与结尾的 `;`。
+替换内容留空表示删除该行（位置保留为空行，行数不变）。
+
+写下来的那一行始终是真实代码，条件与替换在注释里，因此 IDE 能正常解析与跳转，
+文件行数也不变。被注释的形态会连同指令一起保留，使得重复处理的结果稳定：
+
+```text
+条件不成立时 -> //$$ super.neighborChanged(...blockPos2...); //#replace >= 1.21.2 ? ...
+```
+
+## 整行候选组 `//#case`
+
+```java
+//#case
+//?MC >= 12111 ? int x = 3;
+//?MC >= 12110 ? int x = 2;
+//?else ? int x = 1;
+//#endcase
+```
+
+- `//?<条件> ? <内容>`：条件成立时去掉前缀变为真代码，不成立时整行保持注释
+- `//?else ? <内容>`：显式默认分支，总是生效，同时满足"必须有分支命中"的检查
+- `//#case optional`：允许整组一个分支都不命中
+- 默认情况下，组内有分支但全不命中会报错
+- `//?` 只能在 `//#case` 与 `//#endcase` 之间使用
+- `//#case` 与 `//#endcase` 在产物中保留为注释，因为预处理会跑两趟
+
+行尾形式用于"这一行只在条件成立时保留"：
+
+```java
+null, //?> 1.20.1
+```
+
+## 行内候选组 `/*#case*/`
+
+在一行内的任意位置重写紧跟在标记之后的代码：
+
+```java
+register(/*#case*/ Old.class /*?MC >= 12111 ? New.class *//*?MC >= 12110 ? Mid.class */);
+```
+
+条件按降序书写，首个成立者生效，命中之后不再评估后续块，全部不成立时保留基线代码。
+基线是真实代码（IDE 可以解析与跳转），指令是块注释（IDE 忽略），行数不变。
+候选顺序写反（被跳过的块其实也成立）时会输出警告但不中断构建。
+
+## 多行注释块 `/*$$ ... $$*/`
+
+```java
+//#if >= 1.21.11
+/*$$
+int a = 1;
+int b = 2;
+$$*/
+//#endif
+```
+
+块内每行不需要 `//$$` 前缀。分支生效时两个标记行变为空行、块内成为真实代码；
+分支不生效时整块就是一个普通的 Java 块注释。
+
+## 构建期诊断 `//#error` 与 `//#warn`
+
+```java
+//#if >= 1.21.5
+//#error MC 1.21.5 changed this signature, see issue #42
+//#endif
+```
+
+两者只在其所在分支生效时触发。`//#error` 抛出异常中断构建，`//#warn` 仅打印到 stderr。
+
+## 源码位置
 
 源代码位于 `src/main`（具体 Gradle 项目由 `versions/mainVersion` 决定，例如 `11404` 对应 `:1.14.4`），
 在构建其它版本时（Gradle 项目 `:1.8`、`:1.8.9` 等）会自动经过预处理器。

@@ -1,14 +1,15 @@
-Preprocessor (Enhanced Fork)
-============================
+Preprocessor
+============
+
+A [JCP](https://github.com/raydac/java-comment-preprocessor)-inspired preprocessor, used to support multiple
+Minecraft versions.
 
 This repository is based on [ReplayMod/preprocessor](https://github.com/ReplayMod/preprocessor) and
 [Fallen-Breath/preprocessor](https://github.com/Fallen-Breath/preprocessor).
 
 中文文档：[README.md](README.md)
 
-## Modifications in this fork
-
-### Build and integration
+## Modifications
 
 - Automatic tab indentation support
 - `mainProjectFile` and `mainProjectFileRel` for more flexible subproject layout
@@ -56,158 +57,15 @@ This repository is based on [ReplayMod/preprocessor](https://github.com/ReplayMo
 - Be strict about `//#else` ([#13](https://github.com/ReplayMod/preprocessor/issues/13))
   - Content after `//#else` (such as the `//#elseif` typo `//#else#if MC>=12000`) is rejected, and so is a second
     `//#else` for the same `//#if`
-- Fix `//#ifdef`: it used to be matched by `//#if` first, so its condition was parsed as `def <name>` and errored
-  out. It never worked
 - Condition errors list the current variable values, e.g.
   `Invalid condition "MC >= 12105" in line 12 of Foo.java (vars: MC=12105, FABRIC=1)`
+- `//#import` is removed, use a leading `//?` conditional import instead
+- `//#swapwhen` is renamed to `//#replace`
+- Added directives and condition forms, documented below: `//#replace`, `//#case`, `//?`, `//?else`, `/*#case*/`,
+  `/*$$ ... $$*/`, `//#define`, `//#error`, `//#warn`, `//#ifndef`, ranges `X in A..B`, sets `X in [A, B]`,
+  `not in`, `defined(X)` and bare conditions with the primary variable omitted
 
-### Conditions
-
-- Ranges: `X in A..B`, inclusive on the low end and exclusive on the high end. Both bounds accept dot-separated
-  version literals
-  ```java
-  //#if MC in 12005..12110
-  ```
-- Sets: `X in [A, B, C]`
-  ```java
-  //#if MC in [11904, 12001, 12105]
-  ```
-- Negation: `not in`, for both the range and the set form
-  ```java
-  //#if MC not in 12005..12110
-  //#if MC not in [11900, 12110]
-  ```
-- Omitted variable: when a condition starts with an operator or a digit the variable name may be left out. The
-  "primary variable" is `MC` when present in `vars`, the only variable when there is exactly one, and bare
-  conditions are an error otherwise
-  ```java
-  //#if >= 1.21.5              // same as MC >= 1.21.5
-  //?1.21.5 ? same()           // contains a dot, same as MC == 1.21.5
-  //?1.21.2..1.21.6 ? ranged() // same as MC in 1.21.2..1.21.6
-  ```
-  A bare integer is not read as a version: `//#if 0` stays "always false" instead of becoming `MC == 0`
-- `defined(X)`: tests whether `X` exists in `vars` or as a `//#define`
-  ```java
-  //#if defined(FABRIC) && MC >= 12001
-  //#ifndef NEOFORGE
-  ```
-  It is resolved during expansion, so its argument is not replaced by a `//#define` alias
-
-### Condition aliases: `//#define`
-
-```java
-//#define NEW_API MC >= 12102
-//#define NEW_BOTH NEW_API && FABRIC
-
-//#if NEW_BOTH
-//?NEW_API ? Orientation orientation,
-//#replace NEW_API ? Orientation orientation,
-//#endif
-```
-
-Aliases are file-scoped and collected before anything is processed, so one may be used before its definition.
-They may refer to each other; substitutions are parenthesized so precedence is preserved. A duplicate definition
-with a different condition is an error. An alias takes precedence over a `vars` entry of the same name.
-
-### Trailing replacement: `//#replace`
-
-Rewrites its own line, with the condition as part of a trailing comment:
-
-```java
-super.neighborChanged(blockState, level, blockPos, block, blockPos2, bl); //#replace >= 1.21.2 ? super.neighborChanged(blockState, level, blockPos, block, orientation, bl);
-```
-
-When the condition holds the whole line becomes what follows the `?`; otherwise the part before the `?` is kept
-and the directive is dropped. A line starting with `import` gets `import ` and a trailing `;` added for you.
-An empty replacement deletes the line, keeping its position as an empty line so the line count stays stable.
-
-Because the preprocessor runs twice, the commented-out form keeps the directive with it, which makes the result
-stable under repeated processing:
-
-```text
-condition does not hold -> //$$ super.neighborChanged(...blockPos2...); //#replace >= 1.21.2 ? ...
-```
-
-### Line alternatives: `//#case`
-
-```java
-//#case
-//?MC >= 12111 ? int x = 3;
-//?MC >= 12110 ? int x = 2;
-//?else ? int x = 1;
-//#endcase
-```
-
-- `//?<condition> ? <content>`: when it holds the prefix is removed and the line becomes real code, otherwise the
-  line stays a comment
-- `//?else ? <content>`: an explicit default branch, always taken, and it satisfies the must-match check
-- `//#case optional`: allows the group to match no branch at all
-- By default a group that has branches but matches none is an error
-- `//?` is only allowed between `//#case` and `//#endcase`
-- `//#case` and `//#endcase` remain in the output as comments, because preprocessing runs twice
-
-The trailing form keeps a line only while a condition holds:
-
-```java
-null, //?> 1.20.1
-```
-
-### Inline alternatives: `/*#case*/`
-
-Rewrites the code that follows the marker, anywhere in a line:
-
-```java
-register(/*#case*/ Old.class /*?MC >= 12111 ? New.class *//*?MC >= 12110 ? Mid.class */);
-```
-
-Conditions are written in descending order, the first one that holds wins, the blocks after it are not evaluated,
-and when none holds the baseline is kept. The baseline is real code (IDEs resolve and highlight it), the
-directives are block comments (IDEs ignore them), and the line count never changes. When a skipped block would
-also have held, a warning is printed but the build continues.
-
-### Multi-line comment blocks: `/*$$ ... $$*/`
-
-```java
-//#if >= 1.21.11
-/*$$
-int a = 1;
-int b = 2;
-$$*/
-//#endif
-```
-
-Lines inside such a block do not need the `//$$` prefix. While the branch is active both marker lines become
-empty lines and the content becomes real code; while it is inactive the whole block is an ordinary Java block
-comment.
-
-### Build-time diagnostics: `//#error` and `//#warn`
-
-```java
-//#if >= 1.21.5
-//#error MC 1.21.5 changed this signature, see issue #42
-//#endif
-```
-
-Both only fire while the branch they are in is active. `//#error` throws and fails the build, `//#warn` only
-prints to stderr.
-
-### Removed
-
-- `//#import`: replace it with a conditional import written directly in the import section, using the leading
-  `//?` form:
-  ```java
-  //?MC >= 12110 ? import fi.dy.masa.malilib.render.InventoryOverlayContext;
-  ```
-  The directive itself is a line comment and therefore invisible to IDEs, which is why the `//?` form is used
-  instead
-- `//#swapwhen`: renamed to `//#replace`
-
-## Upstream documentation
-
-### The Preprocessor
-
-To support multiple Minecraft versions with the ReplayMod, a
-[JCP](https://github.com/raydac/java-comment-preprocessor)-inspired preprocessor is used:
+## Basic usage
 
 ```java
         //#if MC>=11200
@@ -242,8 +100,160 @@ the `//#if` line. The `//$$` shall be aligned with the inner-most `//#if`.
 ```
 
 Code for the more recent MC version shall be placed in the first branch of the if-else-construct.
+
+`//#ifdef` and `//#ifndef` branch on whether a name is defined in `vars`:
+
+```java
+//#ifdef FABRIC
+//#ifndef NEOFORGE
+```
+
+## Conditions
+
+- Comparisons and logic: `== != >= <= > <`, `&&`, `||`, `!`, parentheses
+- Version literals: `12105`, `1.21.5` and the underscore form `121_05` all denote the same value
+- Ranges: `X in A..B`, inclusive on the low end and exclusive on the high end, both bounds accept
+  dot-separated literals
+  ```java
+  //#if MC in 12005..12110
+  ```
+- Sets: `X in [A, B, C]`
+  ```java
+  //#if MC in [11904, 12001, 12105]
+  ```
+- Negation: `not in`, for both the range and the set form
+  ```java
+  //#if MC not in 12005..12110
+  //#if MC not in [11900, 12110]
+  ```
+- Omitted variable: when a condition starts with an operator or a digit the variable name may be left out. The
+  "primary variable" is `MC` when present in `vars`, the only variable when there is exactly one, and bare
+  conditions are an error otherwise
+  ```java
+  //#if >= 1.21.5              // same as MC >= 1.21.5
+  //?1.21.5 ? same()           // contains a dot, same as MC == 1.21.5
+  //?1.21.2..1.21.6 ? ranged() // same as MC in 1.21.2..1.21.6
+  ```
+  A bare integer is not read as a version: `//#if 0` stays "always false" instead of becoming `MC == 0`
+- `defined(X)`: tests whether `X` exists in `vars` or as a `//#define`
+  ```java
+  //#if defined(FABRIC) && MC >= 12001
+  ```
+  It is resolved during expansion, so its argument is not replaced by a `//#define` alias
+
+## Condition aliases: `//#define`
+
+```java
+//#define NEW_API MC >= 12102
+//#define NEW_BOTH NEW_API && FABRIC
+
+//#if NEW_BOTH
+//?NEW_API ? Orientation orientation,
+//#replace NEW_API ? Orientation orientation,
+//#endif
+```
+
+Aliases are file-scoped and collected before anything is processed, so one may be used before its definition.
+They may refer to each other; substitutions are parenthesized so precedence is preserved. A duplicate definition
+with a different condition is an error. An alias takes precedence over a `vars` entry of the same name.
+
+## Conditional imports
+
 Version-dependent import statements shall be placed separately from and after all other imports but before the
-`static` and `java.*` imports.
+`static` and `java.*` imports, written in the import section with a leading `//?`:
+
+```java
+//?MC >= 12110 ? import fi.dy.masa.malilib.render.InventoryOverlayContext;
+```
+
+When the condition holds the line becomes a real import statement, otherwise it stays a comment. Unlike a
+directive hidden inside a conditional block, this line is part of the import section itself, so its position and
+ordering are in your hands.
+
+## Trailing replacement: `//#replace`
+
+Rewrites its own line, with the condition as part of a trailing comment:
+
+```java
+super.neighborChanged(blockState, level, blockPos, block, blockPos2, bl); //#replace >= 1.21.2 ? super.neighborChanged(blockState, level, blockPos, block, orientation, bl);
+```
+
+When the condition holds the whole line becomes what follows the `?`; otherwise the part before the `?` is kept
+and the directive is dropped. A line starting with `import` gets `import ` and a trailing `;` added for you.
+An empty replacement deletes the line, keeping its position as an empty line so the line count stays stable.
+
+The line as written is always real code, and both the condition and the replacement live in a comment, so IDEs
+parse and navigate it normally and the line count never changes. The commented-out form keeps the directive with
+it, which makes the result stable under repeated processing:
+
+```text
+condition does not hold -> //$$ super.neighborChanged(...blockPos2...); //#replace >= 1.21.2 ? ...
+```
+
+## Line alternatives: `//#case`
+
+```java
+//#case
+//?MC >= 12111 ? int x = 3;
+//?MC >= 12110 ? int x = 2;
+//?else ? int x = 1;
+//#endcase
+```
+
+- `//?<condition> ? <content>`: when it holds the prefix is removed and the line becomes real code, otherwise the
+  line stays a comment
+- `//?else ? <content>`: an explicit default branch, always taken, and it satisfies the must-match check
+- `//#case optional`: allows the group to match no branch at all
+- By default a group that has branches but matches none is an error
+- `//?` is only allowed between `//#case` and `//#endcase`
+- `//#case` and `//#endcase` remain in the output as comments, because preprocessing runs twice
+
+The trailing form keeps a line only while a condition holds:
+
+```java
+null, //?> 1.20.1
+```
+
+## Inline alternatives: `/*#case*/`
+
+Rewrites the code that follows the marker, anywhere in a line:
+
+```java
+register(/*#case*/ Old.class /*?MC >= 12111 ? New.class *//*?MC >= 12110 ? Mid.class */);
+```
+
+Conditions are written in descending order, the first one that holds wins, the blocks after it are not evaluated,
+and when none holds the baseline is kept. The baseline is real code (IDEs resolve and highlight it), the
+directives are block comments (IDEs ignore them), and the line count never changes. When a skipped block would
+also have held, a warning is printed but the build continues.
+
+## Multi-line comment blocks: `/*$$ ... $$*/`
+
+```java
+//#if >= 1.21.11
+/*$$
+int a = 1;
+int b = 2;
+$$*/
+//#endif
+```
+
+Lines inside such a block do not need the `//$$` prefix. While the branch is active both marker lines become
+empty lines and the content becomes real code; while it is inactive the whole block is an ordinary Java block
+comment.
+
+## Build-time diagnostics: `//#error` and `//#warn`
+
+```java
+//#if >= 1.21.5
+//#error MC 1.21.5 changed this signature, see issue #42
+//#endif
+```
+
+Both only fire while the branch they are in is active. `//#error` throws and fails the build, `//#warn` only
+prints to stderr.
+
+## Source location
 
 The source code resides in `src/main` (gradle project determined by `versions/mainVersion` e.g. with `11404`
 it'll be `:1.14.4`) and is automatically passed through the preprocessor when any of the other versions are built
