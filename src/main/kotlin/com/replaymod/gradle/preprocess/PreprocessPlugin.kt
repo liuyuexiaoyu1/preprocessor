@@ -138,12 +138,11 @@ class PreprocessPlugin : Plugin<Any> {
                     inherited.tasks.findByPath("preprocess${cName}Code")?.let { dependsOn(it) }
                     entry(
                         source = inherited.files(
-                            // A source set may reach into the build directory. Feeding the preprocessed output back
-                            // in as an input would make every run re-process its own result, which corrupts lines
-                            // that were commented out by a directive.
-                            inheritedSourceSet.java.srcDirs.filter { dir ->
-                                !dir.absolutePath.replace('\\', '/').contains("/build/preprocessed")
-                            }
+                            inheritedSourceSet.java.srcDirs,
+                            // Every version also needs the shared sources. Inheriting only the parent's preprocessed
+                            // output means the same file gets processed once per version in the chain, and a
+                            // directive already consumed by the parent's version is gone by the time we see it.
+                            project.rootProject.file("src/main/java"),
                         ),
                         overwrites = overwritesJava,
                         generated = generatedJava.get().asFile,

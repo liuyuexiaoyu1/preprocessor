@@ -370,6 +370,36 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                     Entry(relPath.toString(), inBasePath, outBasePath, overwritesBasePath)
                 }
             }
+        }.let { all ->
+            // A version inherits the source set of its parent, which includes that parent's preprocessed output. For
+            // a file that exists in both the shared sources and such an inherited build directory, only the shared
+            // source may be used: the inherited copy has already been through a pass, so its directives are half
+            // consumed and running them again brings commented-out lines back as live code. Keep one entry per
+            // relative path and output directory, preferring the one that does not come from a build directory.
+            fun fromBuild(entry: Entry): Boolean =
+                entry.inBase.toAbsolutePath().toString().replace('\\', '/').contains("/build/")
+
+            val byKey = LinkedHashMap<Pair<Path, String>, Entry>()
+            for (entry in all) {
+                val key = Pair(entry.outBase, entry.relPath)
+                val previous = byKey[key]
+                if (previous == null || (fromBuild(previous) && !fromBuild(entry))) {
+                    byKey[key] = entry
+                }
+            }
+            // Drop inherited copies of anything a real source also provides: those have already been through a pass,
+            // so their directives are half consumed and re-running them turns commented-out lines back into code.
+            val providedBySource = all.filterNot { fromBuild(it) }.map { it.relPath }.toSet()
+            byKey.values.filterNot { fromBuild(it) && it.relPath in providedBySource }
+        }
+
+        System.getenv("PREPROCESS_DUMP_DIR")?.let { dir ->
+            runCatching {
+                java.io.File(dir, "_sourcefiles.txt").writeText(
+                    sourceFiles.filter { it.relPath.endsWith("VaultTask.java") }
+                        .joinToString("\n") { "${it.relPath}   <-   ${it.inBase}" }
+                )
+            }
         }
 
         var mappedSources: Map<String, Pair<String, List<Pair<Int, String>>>>? = null
@@ -482,6 +512,8 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                             lines,
                             lines.map { Pair(it, emptyList()) },
                             relPath,
+                            // This pass feeds the remapper, so it must stay parseable: no `eval` prefixes.
+                            finalPass = false,
                         ).joinToString("\n")
                     }
                 }
@@ -1061,6 +1093,12 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         lines: List<String>,
         remapped: List<Pair<String, List<String>>>,
         fileName: String,
+        /**
+         * Whether this pass produces the final output. The pass that feeds the remapper must not comment lines out
+         * with [Keywords.eval]: the remapper parses the text, and a commented-out brace leaves it unbalanced. Only
+         * the last pass may apply the `eval` prefix.
+         */
+        finalPass: Boolean = true,
     ): List<String> {
         // Aliases are collected before anything is processed, so an alias may be used before its definition and
         // the whole file sees the same set.
@@ -1384,7 +1422,7 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     if (matches) {
                         if (inCase) caseMatched = true
                         code.trimEnd()
-                    } else {
+                    } else if (finalPass) {
                         // Prefix with `eval` but keep the directive itself, so the line reaches the same state on
                         // every pass: the next pass strips the prefix, lands here again and re-applies it, which
                         // makes this a fixed point. Dropping the directive would let the line come back as live
@@ -1392,6 +1430,8 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                         // remapper treats a standalone block comment as trivia.
                         val base = trailingBase
                         base.indentation + kws.eval + " " + base.substring(base.indentation.length)
+                    } else {
+                        trailingBase
                     }
                 }
             } else {
