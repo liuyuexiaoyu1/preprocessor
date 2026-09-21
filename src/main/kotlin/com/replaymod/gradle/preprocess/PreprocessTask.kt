@@ -43,13 +43,17 @@ data class Keywords(
     val disableRemap: String,
     val enableRemap: String,
     val `if`: String,
-    val ifdef: String,
+    val ifdef: String = "//#ifdef",
+    val ifndef: String = "//#ifndef",
     val elseif: String,
     val elif: String,
     val `else`: String,
     val endif: String,
     val eval: String,
-    val swapwhen: String = "//#swapwhen",
+    val define: String = "//#define",
+    val error: String = "//#error",
+    val warn: String = "//#warn",
+    val replace: String = "//#replace",
     val caseStart: String = "//#case",
     val caseBranch: String = "//?",
     val caseEnd: String = "//#endcase",
@@ -72,12 +76,16 @@ open class PreprocessTask @Inject constructor(
             enableRemap = "//#enable-remap",
             `if` = "//#if",
             ifdef = "//#ifdef",
+            ifndef = "//#ifndef",
             elseif = "//#elseif",
             elif = "//#elif",
             `else` = "//#else",
             endif = "//#endif",
             eval = "//$$",
-            swapwhen = "//#swapwhen",
+            define = "//#define",
+            error = "//#error",
+            warn = "//#warn",
+            replace = "//#replace",
             caseStart = "//#case",
             caseBranch = "//?",
             caseEnd = "//#endcase",
@@ -93,12 +101,16 @@ open class PreprocessTask @Inject constructor(
             enableRemap = "##enable-remap",
             `if` = "##if",
             ifdef = "##ifdef",
+            ifndef = "##ifndef",
             elseif = "##elseif",
             elif = "##elif",
             `else` = "##else",
             endif = "##endif",
             eval = "#$$",
-            swapwhen = "##swapwhen",
+            define = "##define",
+            error = "##error",
+            warn = "##warn",
+            replace = "##replace",
             caseStart = "##case",
             caseBranch = "##?",
             caseEnd = "##endcase",
@@ -749,13 +761,121 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
 
 class CommentPreprocessor(private val vars: Map<String, Int>) {
     companion object {
+        /** Marks a `//#case` group as allowed to match no alternative at all (`//#case optional`). */
+        private const val OPTIONAL = "optional"
+        /** Default branch of a `//#case` group (`//?else <content>`). */
+        private const val ELSE_BRANCH = "else"
         private val EXPR_PATTERN = Pattern.compile("(.+)(==|!=|<=|>=|<|>)(.+)")
         // `X in A..B` where A and B are version-like literals or variable names. The low bound is inclusive,
-        // the high bound is exclusive.
-        private val RANGE_PATTERN = Pattern.compile("""(.+?)\s+in\s+(.+?)\.\.(.+)""")
+        // the high bound is exclusive. A leading `not` inverts the test.
+        private val RANGE_PATTERN = Pattern.compile("""(.+?)\s+(not\s+)?in\s+(.+?)\.\.(.+)""")
+        // `X in [A, B, C]`, once again with an optional `not`.
+        private val SET_PATTERN = Pattern.compile("""(.+?)\s+(not\s+)?in\s+\[(.+)]""")
+        /** Replaced during expansion, so that the argument of `defined(X)` is not mistaken for an alias. */
+        private val DEFINED_PATTERN = Pattern.compile("""defined\s*\(\s*([A-Za-z_]\w*)\s*\)""")
+        // Conditions written without the version variable: `>=1.21.5`, `1.20.1`, `1.20.1..1.21.5`.
+        private val BARE_COMPARISON = Pattern.compile("""(>=|<=|==|!=|>|<)\s*[0-9][\w.]*""")
+        private val BARE_VERSION = Pattern.compile("""[0-9][\w.]*""")
+        private val BARE_RANGE = Pattern.compile("""[0-9][\w.]*\.\.[0-9][\w.]*""")
+        /** Cap on `//#define` expansion passes, so a cycle is reported instead of hanging. */
+        private const val MAX_DEFINE_DEPTH = 8
     }
 
     var fail = false
+
+    /**
+     * Aliases declared by `//#define` directives. Cleared at the start of every [convertSource] call, since a
+     * single instance serves all files of a task.
+     */
+    private val definitions = mutableMapOf<String, String>()
+
+    /** The variable a bare condition such as `>=1.21.5` refers to. */
+    private val primaryVar: String? = when {
+        "MC" in vars -> "MC"
+        vars.size == 1 -> vars.keys.first()
+        else -> null
+    }
+
+    /** Appended to condition errors, so the values behind a condition are visible in the build log. */
+    private val varsHint: String =
+        if (vars.isEmpty()) "" else " (vars: " + vars.entries.joinToString(", ") { "${it.key}=${it.value}" } + ")"
+
+    /**
+     * Expands a condition before parsing:
+     * - `defined(X)` becomes `1` or `0`,
+     * - `//#define` aliases are substituted (parenthesized, so precedence is preserved),
+     * - a condition that is just a comparison, a version or a range (`>=1.21.5`) is applied to [primaryVar].
+     */
+    private fun expandCondition(condition: String): String {
+        var text = expandShorthand(condition.trim())
+        if (text.contains("defined")) {
+            val matcher = DEFINED_PATTERN.matcher(text)
+            val builder = StringBuilder()
+            var last = 0
+            while (matcher.find()) {
+                builder.append(text, last, matcher.start())
+                builder.append(if (isDefined(matcher.group(1))) "1" else "0")
+                last = matcher.end()
+            }
+            builder.append(text, last, text.length)
+            text = builder.toString()
+        }
+        return expandDefines(text)
+    }
+
+    private fun isDefined(name: String): Boolean = name in vars || name in definitions
+
+    /**
+     * Stonecutter-style shorthand: dropping the version variable is allowed when the condition is unambiguously a
+     * comparison, a version or a range, i.e. when it starts with an operator or a digit. `MC >= 1.21.5 && FABRIC`
+     * starts with a name and is therefore left alone.
+     */
+    private fun expandShorthand(text: String): String {
+        if (text.isEmpty()) return text
+        val first = text[0]
+        if (first.isLetter() || first == '!' || first == '(') return text
+        val primary = primaryVar ?: throw InvalidExpressionException(text)
+        return when {
+            BARE_RANGE.matcher(text).matches() -> "$primary in $text"
+            BARE_COMPARISON.matcher(text).matches() -> "$primary $text"
+            // A bare integer stays a plain number (`0` and `1` are useful as literal true/false), only a
+            // dot-separated version is read as an equality test.
+            BARE_VERSION.matcher(text).matches() && '.' in text -> "$primary == $text"
+            else -> text
+        }
+    }
+
+    private fun expandDefines(text: String): String {
+        if (definitions.isEmpty()) return text
+        var result = text
+        repeat(MAX_DEFINE_DEPTH) {
+            val builder = StringBuilder()
+            var changed = false
+            var i = 0
+            while (i < result.length) {
+                val c = result[i]
+                if (c.isLetter() || c == '_') {
+                    var j = i
+                    while (j < result.length && (result[j].isLetterOrDigit() || result[j] == '_')) j++
+                    val word = result.substring(i, j)
+                    val replacement = definitions[word]
+                    if (replacement == null) {
+                        builder.append(word)
+                    } else {
+                        builder.append('(').append(replacement).append(')')
+                        changed = true
+                    }
+                    i = j
+                } else {
+                    builder.append(c)
+                    i++
+                }
+            }
+            result = builder.toString()
+            if (!changed) return result
+        }
+        throw InvalidExpressionException(text)
+    }
 
     private fun String.evalVarOrNull(): Int? {
         vars[this]?.let { return it }
@@ -772,7 +892,7 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
     }
     private fun String.evalVar() = evalVarOrNull() ?: throw NoSuchElementException("$this not in $vars")
 
-    internal fun String.evalExpr(): Boolean = ExprParser(this).parse()
+    internal fun String.evalExpr(): Boolean = ExprParser(expandCondition(this)).parse()
 
     /**
      * 解析不带 `&&`、`||`、括号的原子表达式：范围、变量、比较。
@@ -786,9 +906,17 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         val rangeMatcher = RANGE_PATTERN.matcher(atom)
         if (rangeMatcher.matches()) {
             val lhs = rangeMatcher.group(1).trim().evalVar()
-            val low = rangeMatcher.group(2).trim().evalVar()
-            val high = rangeMatcher.group(3).trim().evalVar()
-            return lhs >= low && lhs < high
+            val low = rangeMatcher.group(3).trim().evalVar()
+            val high = rangeMatcher.group(4).trim().evalVar()
+            val inside = lhs >= low && lhs < high
+            return if (rangeMatcher.group(2) != null) !inside else inside
+        }
+
+        val setMatcher = SET_PATTERN.matcher(atom)
+        if (setMatcher.matches()) {
+            val lhs = setMatcher.group(1).trim().evalVar()
+            val inside = setMatcher.group(3).split(',').any { it.trim().evalVar() == lhs }
+            return if (setMatcher.group(2) != null) !inside else inside
         }
 
         val result = atom.evalVarOrNull()
@@ -897,12 +1025,47 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
     private val String.indentation: String
         get() = takeWhile { it == ' ' || it == '\t' }
 
+    /**
+     * Collects the `//#define <name> <condition>` aliases of a file. Kept as a separate pass so aliases are
+     * position independent and a duplicate (with a different condition) can be reported instead of silently
+     * shadowing.
+     */
+    private fun collectDefinitions(kws: Keywords, lines: List<String>, fileName: String) {
+        lines.forEachIndexed { index, raw ->
+            val text = raw.trim()
+            if (!text.startsWith(kws.define)) return@forEachIndexed
+            val rest = text.substring(kws.define.length).trim()
+            val name = rest.takeWhile { !it.isWhitespace() }
+            val condition = rest.substring(name.length).trim()
+            val lineno = index + 1
+            if (name.isEmpty()) {
+                throw ParserException(
+                    "Expected `<name> <condition>` after ${kws.define} in line $lineno of $fileName"
+                )
+            }
+            if (!name[0].isLetter() && name[0] != '_') {
+                throw ParserException("Invalid name \"$name\" after ${kws.define} in line $lineno of $fileName")
+            }
+            if (condition.isEmpty()) {
+                throw ParserException("Expected a condition after \"$name\" in line $lineno of $fileName")
+            }
+            val previous = definitions.put(name, condition)
+            if (previous != null && previous != condition) {
+                throw ParserException("Duplicate ${kws.define} of \"$name\" in line $lineno of $fileName")
+            }
+        }
+    }
+
     fun convertSource(
         kws: Keywords,
         lines: List<String>,
         remapped: List<Pair<String, List<String>>>,
         fileName: String,
     ): List<String> {
+        // Aliases are collected before anything is processed, so an alias may be used before its definition and
+        // the whole file sees the same set.
+        definitions.clear()
+        collectDefinitions(kws, lines, fileName)
         val stack = mutableListOf<IfStackEntry>()
         val indentStack = mutableListOf<String>()
         var active = true
@@ -915,6 +1078,8 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         // Inside a `//#case` group the first matching `//?` alternative wins and the rest are skipped.
         // Outside a group, `//?` acts as a standalone single-line conditional.
         var caseMatched = false
+        // Whether the current group opted out of the "some branch must match" check (`//#case optional`).
+        var caseOptional = false
         // Whether the current `//#case` group contains at least one `//?` alternative. Used to distinguish
         // "no branch matched" (a user error worth reporting) from "the group has no branches at all" (fine).
         var caseHadAnyBranch = false
@@ -925,7 +1090,7 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             try {
                 return condition.trim().evalExpr()
             } catch (e: InvalidExpressionException) {
-                throw ParserException("Invalid expression \"${e.message}\" in line $n of $fileName")
+                throw ParserException("Invalid expression \"${e.message}\" in line $n of $fileName$varsHint")
             }
         }
 
@@ -950,9 +1115,29 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 } else {
                     line
                 }
+            } else if (trimmed.startsWith(kws.define)) {
+                // Already collected by collectDefinitions; the line is kept so a second pass still sees it.
+                line
+            } else if (trimmed.startsWith(kws.error) || trimmed.startsWith(kws.warn)) {
+                val isError = trimmed.startsWith(kws.error)
+                val prefix = if (isError) kws.error else kws.warn
+                val message = trimmed.substring(prefix.length).trim().ifEmpty { "unsupported version" }
+                if (active) {
+                    if (isError) {
+                        throw ParserException("$message in line $n of $fileName$varsHint")
+                    }
+                    System.err.println("$fileName:$n: $message$varsHint")
+                }
+                line
             } else if (trimmed.startsWith(kws.caseStart)) {
-                if (trimmed.length > kws.caseStart.length
-                    && !trimmed.substring(kws.caseStart.length).startsWith("//")) {
+                var trailingCaseText = trimmed.substring(kws.caseStart.length).trim()
+                caseOptional = if (trailingCaseText.startsWith(OPTIONAL)) {
+                    trailingCaseText = trailingCaseText.substring(OPTIONAL.length).trim()
+                    true
+                } else {
+                    false
+                }
+                if (trailingCaseText.isNotEmpty() && !trailingCaseText.startsWith("//")) {
                     throw ParserException("Unexpected content after ${kws.caseStart} in line $n of $fileName")
                 }
                 if (inCase) {
@@ -970,12 +1155,14 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     throw ParserException("Unexpected ${kws.caseEnd} in line $n of $fileName")
                 }
                 // Only complain about a group where a `//?` alternative actually existed but none matched.
-                // Groups that contain no branches at all, and groups inside an inactive `//#if`, are fine.
-                if (active && caseHadAnyBranch && !caseMatched) {
+                // Groups that contain no branches at all, groups inside an inactive `//#if`, and groups marked
+                // `optional` are fine.
+                if (active && caseHadAnyBranch && !caseMatched && !caseOptional) {
                     throw ParserException(
                         "No branch in the ${kws.caseStart} block starting at line $caseLine matched " +
                                 "before ${kws.caseEnd} in line $n of $fileName; " +
-                                "add a `${kws.caseBranch}t` default branch or fix the conditions"
+                                "add a `${kws.caseBranch}$ELSE_BRANCH` default branch, mark the group " +
+                                "`${kws.caseStart} $OPTIONAL`, or fix the conditions"
                     )
                 }
                 inCase = false
@@ -992,22 +1179,52 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     line
                 } else {
                     val directive = trimmed.substring(kws.caseBranch.length).trim()
-                    val split = splitConditionAndDirective(directive)
-                        ?: throw ParserException(
-                            "Expected `<condition> <content>` after ${kws.caseBranch} in line $n of $fileName"
-                        )
-                    val matches = try {
-                        split.first.evalExpr()
-                    } catch (e: Exception) {
-                        throw ParserException("Invalid condition \"${split.first}\" in line $n of $fileName")
-                    }
-                    if (matches && active) {
-                        if (inCase) caseMatched = true
-                        line.takeWhile { it == ' ' || it == '\t' } + split.second
+                    if (directive == ELSE_BRANCH || directive.startsWith("$ELSE_BRANCH ")) {
+                        // `//?else <content>`: the explicit default branch of a group, i.e. always taken.
+                        if (!inCase) {
+                            throw ParserException(
+                                "${kws.caseBranch}$ELSE_BRANCH is only allowed inside a ${kws.caseStart} " +
+                                    "block, but line $n of $fileName is outside one"
+                            )
+                        }
+                        val content = directive.substring(ELSE_BRANCH.length).trim()
+                        if (active) {
+                            caseMatched = true
+                            if (content.isEmpty()) "" else line.indentation + content
+                        } else {
+                            line
+                        }
                     } else {
-                        line
+                        val split = splitConditionAndDirective(directive)
+                            ?: throw ParserException(
+                                "Expected `<condition> ? <content>` after ${kws.caseBranch} in line $n of $fileName"
+                            )
+                        val matches = try {
+                            split.first.evalExpr()
+                        } catch (e: Exception) {
+                            throw ParserException("Invalid condition \"${split.first}\" in line $n of $fileName$varsHint")
+                        }
+                        if (matches && active) {
+                            if (inCase) caseMatched = true
+                            if (split.second.isEmpty()) "" else line.indentation + split.second
+                        } else {
+                            line
+                        }
                     }
                 }
+            } else if (trimmed.startsWith(kws.ifdef) || trimmed.startsWith(kws.ifndef)) {
+                // Must be checked before `kws.if`, since both `//#ifdef` and `//#ifndef` start with `//#if`.
+                val negated = trimmed.startsWith(kws.ifndef)
+                val prefix = if (negated) kws.ifndef else kws.ifdef
+                val name = trimmed.substring(prefix.length).trim()
+                if (name.isEmpty()) {
+                    throw ParserException("Expected a variable name after $prefix in line $n of $fileName")
+                }
+                val result = vars.containsKey(name) != negated
+                stack.push(IfStackEntry(result, n, elseFound = false, trueFound = result))
+                indentStack.push(line.indentation)
+                active = active && result
+                line
             } else if (trimmed.startsWith(kws.`if`)) {
                 val result = evalCondition(trimmed.substring(kws.`if`.length))
                 stack.push(IfStackEntry(result, n, elseFound = false, trueFound = result))
@@ -1055,12 +1272,6 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 indentStack.pop()
                 indentStack.push(line.indentation)
                 active = stack.all { it.currentValue }
-                line
-            } else if (trimmed.startsWith(kws.ifdef)) {
-                val result = vars.containsKey(trimmed.substring(kws.ifdef.length))
-                stack.push(IfStackEntry(result, n, elseFound = false, trueFound = result))
-                indentStack.push(line.indentation)
-                active = active && result
                 line
             } else if (trimmed.startsWith(kws.endif)) {
                 if (stack.isEmpty()) {
@@ -1112,32 +1323,34 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     System.err.println("$fileName:$n: $message")
                 }
             }
-            val swapAt = line.indexOf(kws.swapwhen)
+            val swapAt = line.indexOf(kws.replace)
             val trailingCaseAt = if (trimmed.startsWith(kws.caseBranch)) -1 else line.indexOf(kws.caseBranch)
 
             val outLine = if (swapAt >= 0 && active) {
                 val base = line.substring(0, swapAt)
-                val directive = line.substring(swapAt + kws.swapwhen.length).trim()
+                val directive = line.substring(swapAt + kws.replace.length).trim()
                 val split = splitConditionAndDirective(directive)
                     ?: throw ParserException(
-                        "Expected `<condition> <replacement>` after ${kws.swapwhen} in line $n of $fileName"
+                        "Expected `<condition> ? <replacement>` after ${kws.replace} in line $n of $fileName"
                     )
                 val matches = try {
                     split.first.evalExpr()
                 } catch (e: Exception) {
-                    throw ParserException("Invalid condition \"${split.first}\" in line $n of $fileName")
+                    throw ParserException("Invalid condition \"${split.first}\" in line $n of $fileName$varsHint")
                 }
                 if (matches) {
-                    val indent = line.takeWhile { it == ' ' || it == '\t' }
+                    val indent = line.indentation
                     val replacement = split.second
-                    if (base.trimStart().startsWith("import ")) {
-                        if (replacement.startsWith("import ")) {
+                    when {
+                        // An empty replacement deletes the whole line. It stays in place as an empty line, so the
+                        // remapper's line-for-line view is unaffected and the file remains valid.
+                        replacement.isEmpty() -> ""
+                        base.trimStart().startsWith("import ") -> if (replacement.startsWith("import ")) {
                             indent + replacement.trimEnd()
                         } else {
                             indent + "import " + replacement.removeSuffix(";") + ";"
                         }
-                    } else {
-                        indent + replacement
+                        else -> indent + replacement
                     }
                 } else {
                     base.trimEnd()
@@ -1155,7 +1368,7 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     val matches = try {
                         condition.evalExpr()
                     } catch (e: Exception) {
-                        throw ParserException("Invalid condition \"$condition\" in line $n of $fileName")
+                        throw ParserException("Invalid condition \"$condition\" in line $n of $fileName$varsHint")
                     }
                     if (matches) {
                         if (inCase) caseMatched = true
@@ -1221,7 +1434,7 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     condition.evalExpr()
                 } catch (e: Exception) {
                     if (replacement == null) {
-                        throw ParserException("Invalid condition \"$condition\" in line $n of $fileName")
+                        throw ParserException("Invalid condition \"$condition\" in line $n of $fileName$varsHint")
                     }
                     false
                 }
@@ -1252,13 +1465,17 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         return result
     }
 
+    /**
+     * Splits `"<condition> ? <rest>"` at the first `?` whose left hand side is a usable condition. An empty
+     * `<rest>` is allowed and means "delete the content".
+     */
     private fun splitConditionAndDirective(text: String): Pair<String, String>? {
         var i = 0
         while (i < text.length) {
             if (text[i] == '?') {
                 val condition = text.substring(0, i).trim()
                 val rest = text.substring(i + 1).trim()
-                if (condition.isNotEmpty() && rest.isNotEmpty()) {
+                if (condition.isNotEmpty()) {
                     val accepted = try {
                         condition.evalExpr()
                         true

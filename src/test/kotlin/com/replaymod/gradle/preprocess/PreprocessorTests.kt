@@ -12,7 +12,9 @@ class PreprocessorTests : FunSpec({
         "one" to 1,
         "two" to 2,
         "t" to 1,
-        "f" to 0
+        "f" to 0,
+        // Present so the bare-condition shorthand has a primary variable to fall back on.
+        "MC" to 12105
     )
     with(CommentPreprocessor(vars)) {
         context("evalExpr") {
@@ -207,43 +209,43 @@ class PreprocessorTests : FunSpec({
                     //#endif
                 """.convert()
             }
-            test("swapwhen rewrites the line when the condition holds") {
+            test("replace rewrites the line when the condition holds") {
                 val out = """
                     package com.example;
-                    import com.example.a.Old; //#swapwhen t ? com.example.b.New
+                    import com.example.a.Old; //#replace t ? com.example.b.New
                     class C {}
                 """.convert()
                 out.lines().map { it.trim() }.contains("import com.example.b.New;") shouldBe true
             }
-            test("swapwhen keeps the line and drops the directive otherwise") {
+            test("replace keeps the line and drops the directive otherwise") {
                 val out = """
                     package com.example;
-                    import com.example.a.Old; //#swapwhen f ? com.example.b.New
+                    import com.example.a.Old; //#replace f ? com.example.b.New
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
                 outLines.contains("import com.example.a.Old;") shouldBe true
-                outLines.none { it.contains("swapwhen") } shouldBe true
+                outLines.none { it.contains("replace") } shouldBe true
             }
-            test("swapwhen also applies to code lines") {
-                val out = "class C {\n    int x = 1; //#swapwhen t ? int x = 2;\n}".convert()
+            test("replace also applies to code lines") {
+                val out = "class C {\n    int x = 1; //#replace t ? int x = 2;\n}".convert()
                 out.lines().map { it.trim() }.contains("int x = 2;") shouldBe true
             }
-            test("swapwhen works when the condition contains spaces and the code contains spaces") {
+            test("replace works when the condition contains spaces and the code contains spaces") {
                 val out = """
                     class C {
-                        return true; //#swapwhen two >= 2 ? return BlockPos.TraversalNodeStatus.ACCEPT;
+                        return true; //#replace two >= 2 ? return BlockPos.TraversalNodeStatus.ACCEPT;
                     }
                 """.convert()
                 out.lines().map { it.trim() }.contains("return BlockPos.TraversalNodeStatus.ACCEPT;") shouldBe true
             }
-            test("swapwhen skips an explicit separator that sits inside a ternary operator") {
-                val out = "class C {\n    return true; //#swapwhen t ? return a ? b : c;\n}".convert()
+            test("replace skips an explicit separator that sits inside a ternary operator") {
+                val out = "class C {\n    return true; //#replace t ? return a ? b : c;\n}".convert()
                 out.lines().map { it.trim() }.contains("return a ? b : c;") shouldBe true
             }
-            test("throws on swapwhen without the ? separator") {
+            test("throws on replace without the ? separator") {
                 shouldThrow<CommentPreprocessor.ParserException> {
-                    "class C {\n    int x = 1; //#swapwhen t int x = 2;\n}".convert()
+                    "class C {\n    int x = 1; //#replace t int x = 2;\n}".convert()
                 }
             }
             test("inline case replaces the code it follows when the condition holds") {
@@ -355,9 +357,9 @@ class PreprocessorTests : FunSpec({
                 """.convert()
                 out.lines().map { it.trim() }.contains("codeA();") shouldBe true
             }
-            test("throws on malformed swapwhen") {
+            test("throws on malformed replace") {
                 shouldThrow<CommentPreprocessor.ParserException> {
-                    "int x = 1; //#swapwhen\nclass C {}".convert()
+                    "int x = 1; //#replace\nclass C {}".convert()
                 }
             }
             test("throws on malformed case branch") {
@@ -538,6 +540,205 @@ class PreprocessorTests : FunSpec({
                 outLines.contains("//$$ codeA();") shouldBe true
                 outLines.contains("codeB();") shouldBe true
             }
+            test("ifdef activates when the variable is present") {
+                val out = """
+                    //#ifdef t
+                    int x = 1;
+                    //#endif
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+            }
+            test("ifdef deactivates when the variable is absent") {
+                val out = """
+                    //#ifdef bogus
+                    int x = 1;
+                    //#endif
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe false
+            }
+            test("ifndef activates when the variable is absent") {
+                val out = """
+                    //#ifndef bogus
+                    int x = 1;
+                    //#endif
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+            }
+            test("ifndef deactivates when the variable is present") {
+                val out = """
+                    //#ifndef t
+                    int x = 1;
+                    //#endif
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe false
+            }
+            test("throws when ifndef has no variable name") {
+                shouldThrow<CommentPreprocessor.ParserException> { "//#ifndef\nclass C {}".convert() }
+            }
+            test("an optional case group is allowed to match nothing") {
+                val out = """
+                    //#case optional
+                    //?f ? codeA();
+                    //#endcase
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("codeA();") shouldBe false
+            }
+            test("an optional marker may be followed by a comment") {
+                """
+                    //#case optional // note
+                    //?f ? codeA();
+                    //#endcase
+                    class C {}
+                """.convert()
+            }
+            test("throws on unknown content after case start") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//#case bogus\n//?f ? codeA();\n//#endcase\nclass C {}".convert()
+                }
+            }
+            test("an else branch is taken when no other branch matches") {
+                val out = """
+                    //#case
+                    //?f ? codeA();
+                    //?else codeB();
+                    //#endcase
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("codeB();") shouldBe true
+            }
+            test("an else branch is skipped when an earlier branch matched") {
+                val out = """
+                    //#case
+                    //?t ? codeA();
+                    //?else codeB();
+                    //#endcase
+                    class C {}
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("codeA();") shouldBe true
+                outLines.contains("codeB();") shouldBe false
+            }
+            test("an else branch satisfies the must-match check") {
+                """
+                    //#case
+                    //?f ? codeA();
+                    //?else codeB();
+                    //#endcase
+                    class C {}
+                """.convert()
+            }
+            test("an empty else branch clears the line") {
+                val out = """
+                    //#case
+                    //?f ? codeA();
+                    //?else
+                    //#endcase
+                    class C {}
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("codeA();") shouldBe false
+                outLines.none { it.contains("else") } shouldBe true
+            }
+            test("throws on else branch outside a case group") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//?else codeA();\nclass C {}".convert()
+                }
+            }
+            test("define creates an alias usable before its definition") {
+                val out = """
+                    //?NEW_API ? int x = 1;
+                    //#define NEW_API MC >= 12102
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+            }
+            test("a define alias may carry a compound condition") {
+                val out = """
+                    //#define NEW_API MC >= 12102 && t
+                    //?NEW_API ? int x = 1;
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+            }
+            test("define aliases may refer to each other") {
+                val out = """
+                    //#define BASE MC >= 12102
+                    //#define NEW_API BASE && t
+                    //?NEW_API ? int x = 1;
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+            }
+            test("a define alias works as an //#if condition") {
+                val out = """
+                    //#define NEW_API MC >= 12102
+                    //#if NEW_API
+                    int x = 1;
+                    //#endif
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+            }
+            test("throws on a duplicate define with a different condition") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//#define A MC >= 12102\n//#define A MC >= 12103\nclass C {}".convert()
+                }
+            }
+            test("throws on a define without a condition") {
+                shouldThrow<CommentPreprocessor.ParserException> { "//#define A\nclass C {}".convert() }
+            }
+            test("throws on a define without a name") {
+                shouldThrow<CommentPreprocessor.ParserException> { "//#define\nclass C {}".convert() }
+            }
+            test("error fails the build while its branch is active") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//#if t\n//#error not adapted yet\n//#endif\nclass C {}".convert()
+                }
+            }
+            test("error is ignored inside an inactive branch") {
+                """
+                    //#if f
+                    //#error not adapted yet
+                    //#endif
+                    class C {}
+                """.convert()
+            }
+            test("warn keeps the build going") {
+                val out = """
+                    //#if t
+                    //#warn heads up
+                    //#endif
+                    class C {}
+                """.convert()
+                out.lines().map { it.trim() }.contains("class C {}") shouldBe true
+            }
+            test("condition errors list the variable values") {
+                val error = shouldThrow<CommentPreprocessor.ParserException> {
+                    "//#if 1 ==\n//#endif\nclass C {}".convert()
+                }
+                error.message!!.contains("MC=12105") shouldBe true
+            }
+            test("an empty replacement deletes the line") {
+                val out = "class C {\n    int x = 1; //#replace t ?\n}".convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.contains("int x = 1;") shouldBe false
+                outLines.none { it.contains("#replace") } shouldBe true
+            }
+            test("an empty replacement keeps the line when the condition fails") {
+                val out = "class C {\n    int x = 1; //#replace f ?\n}".convert()
+                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+            }
+            test("an empty case branch content clears the line") {
+                val src = "//#case\n//?t ?\n//#endcase\nclass C {}"
+                val out = src.convert()
+                out.lines().size shouldBe src.lines().size
+                out.lines().map { it.trim() }.contains("//?t ?") shouldBe false
+            }
             test("range syntax MC in A..B is inclusive on the low end and exclusive on the high end") {
                 with(CommentPreprocessor(mapOf("MC" to 12005))) {
                     "MC in 12005..12110".evalExpr() shouldBe true
@@ -562,6 +763,55 @@ class PreprocessorTests : FunSpec({
                     "MC in 12005..12110 && X == 0".evalExpr() shouldBe false
                     "MC in 12005..12110 || X == 0".evalExpr() shouldBe true
                 }
+            }
+            test("set syntax X in [a, b, c]") {
+                with(CommentPreprocessor(mapOf("MC" to 12005))) {
+                    "MC in [12005, 12110]".evalExpr() shouldBe true
+                    "MC in [11900, 12110]".evalExpr() shouldBe false
+                    "MC in [1.20.5, 1.21.10]".evalExpr() shouldBe true
+                }
+            }
+            test("not in inverts the range and the set form") {
+                with(CommentPreprocessor(mapOf("MC" to 12005))) {
+                    "MC not in 12005..12110".evalExpr() shouldBe false
+                    "MC not in 11900..12005".evalExpr() shouldBe true
+                    "MC not in [11900, 12110]".evalExpr() shouldBe true
+                    "MC not in [12005, 12110]".evalExpr() shouldBe false
+                }
+            }
+            test("set syntax can be combined with && and ||") {
+                with(CommentPreprocessor(mapOf("MC" to 12005, "X" to 1))) {
+                    "MC in [12005, 12110] && X == 1".evalExpr() shouldBe true
+                    "MC in [11900, 12110] || X == 1".evalExpr() shouldBe true
+                    "MC not in [11900, 12110] && X == 0".evalExpr() shouldBe false
+                }
+            }
+            test("a bare comparison uses the primary variable") {
+                ">= 1.21.2".evalExpr() shouldBe true
+                "< 1.21.2".evalExpr() shouldBe false
+                ">= 1.21.5".evalExpr() shouldBe true
+            }
+            test("a bare dot-separated version means equality") {
+                "1.21.5".evalExpr() shouldBe true
+                "1.21.2".evalExpr() shouldBe false
+            }
+            test("a bare range uses the primary variable") {
+                "1.21.2..1.21.6".evalExpr() shouldBe true
+                "1.21.6..1.21.8".evalExpr() shouldBe false
+            }
+            test("a bare integer stays a literal") {
+                "0".evalExpr() shouldBe false
+                "1".evalExpr() shouldBe true
+            }
+            test("a condition starting with a name is left alone") {
+                "MC >= 1.21.2 && t".evalExpr() shouldBe true
+                "zero == 0".evalExpr() shouldBe true
+            }
+            test("defined(X) covers variables and reports unknown names") {
+                "defined(t)".evalExpr() shouldBe true
+                "defined(bogus)".evalExpr() shouldBe false
+                "!defined(bogus)".evalExpr() shouldBe true
+                "defined(t) && MC >= 1.21.2".evalExpr() shouldBe true
             }
             test("$$*/ can sit at the end of the last line of a block") {
                 val out = """
