@@ -486,14 +486,18 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                     val lines = text.lines()
                     val kws = keywords.get().entries.find { (ext, _) -> relPath.endsWith(ext) }
                     if (kws != null) {
-                        processedSources[relPath] = CommentPreprocessor(vars.get()).convertSource(
+                        val preprocessor = CommentPreprocessor(vars.get())
+                        processedSources[relPath] = preprocessor.hideCandidateAnnotations(
+                            preprocessor.convertSource(
+                                kws.value,
+                                lines,
+                                lines.map { Pair(it, emptyList()) },
+                                relPath,
+                                // This pass feeds the remapper, so it must stay parseable: no `eval` prefixes.
+                                finalPass = false,
+                            ).joinToString("\n"),
                             kws.value,
-                            lines,
-                            lines.map { Pair(it, emptyList()) },
-                            relPath,
-                            // This pass feeds the remapper, so it must stay parseable: no `eval` prefixes.
-                            finalPass = false,
-                        ).joinToString("\n")
+                        )
                     }
                 }
             }
@@ -531,7 +535,8 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                         for ((line, error) in errors) {
                             errorsByLine.getOrPut(line, ::mutableListOf).add(error)
                         }
-                        source.lines().mapIndexed { index: Int, line: String -> Pair(line, errorsByLine[index] ?: emptyList<String>()) }
+                        commentPreprocessor.restoreCandidateAnnotations(source).lines()
+                            .mapIndexed { index: Int, line: String -> Pair(line, errorsByLine[index] ?: emptyList<String>()) }
                     } ?: lines.map { Pair(it, emptyList()) }
                 }
                 commentPreprocessor.convertFile(kws.value, file, outFile, javaTransform)
@@ -1583,6 +1588,30 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         }
         return null
     }
+
+    /**
+     * A trailing `//#replace` keeps its candidate on the line so a version further down the inheritance chain
+     * still gets to evaluate it. But the remapper reads annotation arguments out of whatever text it is handed,
+     * so a candidate holding an annotation - `@ModifyVariable(method = "<init>", ...)` - was parsed as if it were
+     * live code, and its bare method name then came out ambiguous against the target's overloads. Double the `@`
+     * behind a trailing `//#replace` while the remapper works; the pass that emits the file undoes it with
+     * [restoreCandidateAnnotations].
+     */
+    internal fun hideCandidateAnnotations(text: String, kws: Keywords): String =
+        text.lineSequence().joinToString("\n") { line ->
+            val at = line.indexOf(kws.replace)
+            if (at <= 0) return@joinToString line
+            val directive = line.substring(at + kws.replace.length)
+            val q = directive.indexOf('?')
+            if (q < 0) return@joinToString line
+            val candidateStart = at + kws.replace.length + q + 1
+            val candidate = line.substring(candidateStart)
+            if ('@' !in candidate) return@joinToString line
+            line.substring(0, candidateStart) + candidate.replace("@", "@@")
+        }
+
+    /** Undoes [hideCandidateAnnotations] on the text the remapper produced. */
+    internal fun restoreCandidateAnnotations(text: String): String = text.replace("@@", "@")
 
     /**
      * Writes an intermediate artifact when the `PREPROCESS_DUMP_DIR` environment variable is set, so the text the
