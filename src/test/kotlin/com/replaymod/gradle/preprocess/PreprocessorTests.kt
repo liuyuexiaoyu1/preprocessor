@@ -523,6 +523,35 @@ class PreprocessorTests : FunSpec({
                     outLines.any { it.startsWith("@C(") } shouldBe true
                     outLines.none { it.startsWith("@B(") } shouldBe true
                 }
+                test("a standalone //? on an import line survives the second pass") {
+                    // `//?>= 1.21.2 ? import ...` with the directive sitting at column 0 and no space after
+                    // `//?`. It holds from 1.21.3 up, so the version that runs it has to hand a usable line to
+                    // the next pass.
+                    val src = "//?>= 1.21.2 ? import net.minecraft.tags.ItemTags;\n\nclass C {}"
+                    val once = convert(src, 12103)
+                    once.lines().map { it.trim() }
+                        .any { it.startsWith("import net.minecraft.tags.ItemTags;") } shouldBe true
+                    convert(once, 12103) shouldBe once
+                }
+                test("a line the first pass rewrote is not confused with its source line") {
+                    // Mirrors what `convertFile` does: it hands `convertSource` the *source* lines as the
+                    // originals while the remapped side already carries this pass's output. Reading the
+                    // trailing-directive flag off the remapped text made the fallback return the source
+                    // line, whose `//?` sits at column 0, so the condition came out as the whole directive.
+                    fun convertPair(orig: List<String>, remapped: List<String>, mc: Int) =
+                        with(CommentPreprocessor(mapOf("MC" to mc))) {
+                            convertSource(
+                                PreprocessTask.DEFAULT_KEYWORDS,
+                                orig,
+                                remapped.map { it to emptyList() },
+                                "test.java"
+                            ).joinToString("\n")
+                        }
+                    val src = listOf("//?>= 1.21.2 ? import net.minecraft.tags.ItemTags;", "", "class C {}")
+                    val firstPass = listOf("import net.minecraft.tags.ItemTags; //? >= 1.21.2", "", "class C {}")
+                    convertPair(src, firstPass, 12103).lines().map { it.trim() }
+                        .any { it.startsWith("import net.minecraft.tags.ItemTags;") } shouldBe true
+                }
             }
             test("trailing //?else with content or outside a case group is rejected") {
                 shouldThrow<CommentPreprocessor.ParserException> {

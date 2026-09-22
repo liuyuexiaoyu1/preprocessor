@@ -1131,7 +1131,14 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             // syntax node follows them, which moves or drops the prefix this pass relies on - inside a class body
             // that turned the line back into live code. Feeding the original line through leaves the directive
             // exactly where it was written.
-            val trailingCaseLine = !trimmed.startsWith(kws.caseBranch) && line.indexOf(kws.caseBranch) >= 0
+            // Decide this from the line as the caller handed it in, not from the remapped text. `line` is the
+            // *result* of the pass that feeds the remapper (plus the remapper itself), so it already carries
+            // the trailing form this pass writes out. Testing it here made a line that the earlier pass had
+            // just rewritten count as "the caller wrote a trailing directive", and the fallback below then
+            // handed the trailing branch the *source* line instead - whose `//?` sits at index 0, so the
+            // condition was read as everything after it.
+            val trailingCaseLine =
+                !originalLine.trim().startsWith(kws.caseBranch) && originalLine.indexOf(kws.caseBranch) >= 0
             val mapped = if (inBlockComment) {
                 val endIdx = line.indexOf(kws.blockEnd)
                 if (endIdx >= 0) {
