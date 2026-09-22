@@ -26,7 +26,7 @@ English documentation: [README_en.md](README_en.md)
 - "Missing endif" 报错附带行号提示
 - `//#if` 中使用未定义变量时给出更清晰的报错
 - 使用 architectury loom 时改进 srg 映射模式的探测
-- 使用自定义的 [remap](https://github.com/ReplayMod/remap) 分支：https://github.com/Fallen-Breath/remap
+- 使用自定义的 [remap](https://github.com/ReplayMod/remap) 分支：https://github.com/liuyuexiaoyu1/remap
   - 减少无意义的警告信息
   - 默认关闭 remap 的 kotlin 编译器消息收集。可通过
     `preprocess { enableRemapMessageCollector = true }` 重新开启
@@ -55,8 +55,6 @@ English documentation: [README_en.md](README_en.md)
     同一个 `//#if` 出现第二个 `//#else` 同样会被拒绝
 - 条件表达式报错时附带当前变量取值，例如
   `Invalid condition "MC >= 12105" in line 12 of Foo.java (vars: MC=12105, FABRIC=1)`
-- 移除 `//#import`，改用行首 `//?` 条件化导入
-- `//#swapwhen` 改名为 `//#replace`
 - 新增以下指令与条件写法，详见下文：`//#replace`、`//#case`、`//?`、`//?else`、
   `/*#case*/`、`/*$$ ... $$*/`、`//#define`、`//#error`、`//#warn`、`//#ifndef`、
   区间 `X in A..B`、集合 `X in [A, B]`、`not in`、`defined(X)`、省略主变量的裸条件

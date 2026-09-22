@@ -28,7 +28,7 @@ This repository is based on [ReplayMod/preprocessor](https://github.com/ReplayMo
 - Line number hint for the "Missing endif" error
 - Improved error message when using an undefined variable in a `//#if` expression
 - Improved srg mapping mode detection when using architectury loom
-- Use a custom [remap](https://github.com/ReplayMod/remap) fork: https://github.com/Fallen-Breath/remap
+- Use a custom [remap](https://github.com/ReplayMod/remap) fork: https://github.com/liuyuexiaoyu1/remap
   - Less useless warning messages
   - Message logging of remap's kotlin compiler message collector is disabled by default. Re-enable it with
     `preprocess { enableRemapMessageCollector = true }`
@@ -59,8 +59,6 @@ This repository is based on [ReplayMod/preprocessor](https://github.com/ReplayMo
     `//#else` for the same `//#if`
 - Condition errors list the current variable values, e.g.
   `Invalid condition "MC >= 12105" in line 12 of Foo.java (vars: MC=12105, FABRIC=1)`
-- `//#import` is removed, use a leading `//?` conditional import instead
-- `//#swapwhen` is renamed to `//#replace`
 - Added directives and condition forms, documented below: `//#replace`, `//#case`, `//?`, `//?else`, `/*#case*/`,
   `/*$$ ... $$*/`, `//#define`, `//#error`, `//#warn`, `//#ifndef`, ranges `X in A..B`, sets `X in [A, B]`,
   `not in`, `defined(X)` and bare conditions with the primary variable omitted
