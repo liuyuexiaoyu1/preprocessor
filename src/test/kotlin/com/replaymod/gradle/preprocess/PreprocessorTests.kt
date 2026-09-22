@@ -225,7 +225,7 @@ class PreprocessorTests : FunSpec({
                     import com.example.a.Old; //#replace t ? com.example.b.New
                     class C {}
                 """.convert()
-                out.lines().map { it.trim() }.contains("import com.example.b.New;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("import com.example.b.New;") } shouldBe true
             }
             test("replace keeps the line and drops the directive otherwise") {
                 val out = """
@@ -240,7 +240,7 @@ class PreprocessorTests : FunSpec({
             }
             test("replace also applies to code lines") {
                 val out = "class C {\n    int x = 1; //#replace t ? int x = 2;\n}".convert()
-                out.lines().map { it.trim() }.contains("int x = 2;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("int x = 2;") } shouldBe true
             }
             test("replace works when the condition contains spaces and the code contains spaces") {
                 val out = """
@@ -248,11 +248,11 @@ class PreprocessorTests : FunSpec({
                         return true; //#replace two >= 2 ? return BlockPos.TraversalNodeStatus.ACCEPT;
                     }
                 """.convert()
-                out.lines().map { it.trim() }.contains("return BlockPos.TraversalNodeStatus.ACCEPT;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("return BlockPos.TraversalNodeStatus.ACCEPT;") } shouldBe true
             }
             test("replace skips an explicit separator that sits inside a ternary operator") {
                 val out = "class C {\n    return true; //#replace t ? return a ? b : c;\n}".convert()
-                out.lines().map { it.trim() }.contains("return a ? b : c;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("return a ? b : c;") } shouldBe true
             }
             test("throws on replace without the ? separator") {
                 shouldThrow<CommentPreprocessor.ParserException> {
@@ -771,8 +771,9 @@ class PreprocessorTests : FunSpec({
             test("an empty replacement deletes the line") {
                 val out = "class C {\n    int x = 1; //#replace t ?\n}".convert()
                 val outLines = out.lines().map { it.trim() }
-                outLines.contains("int x = 1;") shouldBe false
-                outLines.none { it.contains("#replace") } shouldBe true
+                outLines.none { it.startsWith("int x = 1;") } shouldBe true
+                // The directive survives even an empty replacement, so a later version can re-evaluate it.
+                outLines.any { it.startsWith("//#replace t ?") } shouldBe true
             }
             test("an empty replacement keeps the line when the condition fails") {
                 val out = "class C {\n    int x = 1; //#replace f ?\n}".convert()

@@ -1391,16 +1391,21 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 if (matches) {
                     val indent = line.indentation
                     val replacement = split.second
+                    // Keep the directive on the line even once it has been applied. A version further down the
+                    // inheritance chain inherits this text and may evaluate the same condition differently, so it
+                    // still needs the candidate; dropping it here left that version with no way back. Re-running a
+                    // pass reproduces the line identically, so this is a fixed point.
+                    val suffix = " " + kws.replace + " " + directive
                     when {
                         // An empty replacement deletes the whole line. It stays in place as an empty line, so the
                         // remapper's line-for-line view is unaffected and the file remains valid.
-                        replacement.isEmpty() -> ""
+                        replacement.isEmpty() -> kws.replace + " " + directive
                         base.trimStart().startsWith("import ") -> if (replacement.startsWith("import ")) {
-                            indent + replacement.trimEnd()
+                            indent + replacement.trimEnd() + suffix
                         } else {
-                            indent + "import " + replacement.removeSuffix(";") + ";"
+                            indent + "import " + replacement.removeSuffix(";") + ";" + suffix
                         }
-                        else -> indent + replacement
+                        else -> indent + replacement + suffix
                     }
                 } else {
                     // Keep the directive. A version in the middle of the inheritance chain evaluates the
