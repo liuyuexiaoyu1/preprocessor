@@ -1405,9 +1405,36 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 if (condition.isEmpty()) {
                     throw ParserException("Expected a condition after ${kws.caseBranch} in line $n of ${fileName}")
                 }
+                // `code //?else`: the default branch of a group, i.e. taken when no earlier alternative won.
+                // The line-level form carries its content after the directive, but here the code already sits
+                // in front of it, so the trailing form takes none - writing one would silently become content.
+                val isElseBranch = condition == ELSE_BRANCH
+                if (condition.startsWith("$ELSE_BRANCH ")) {
+                    throw ParserException(
+                        "Expected just `${kws.caseBranch}$ELSE_BRANCH` on the trailing form; the content goes " +
+                            "before the directive in line $n of $fileName"
+                    )
+                }
+                if (isElseBranch && !inCase) {
+                    throw ParserException(
+                        "${kws.caseBranch}$ELSE_BRANCH is only allowed inside a ${kws.caseStart} " +
+                            "block, but line $n of $fileName is outside one"
+                    )
+                }
                 if (inCase) caseHadAnyBranch = true
                 if (inCase && caseMatched) {
-                    trailingBase
+                    // An earlier alternative already won. Unlike the line-level form, whose content is hidden
+                    // inside the directive's own comment, this line's code sits in front of `//?` and would
+                    // stay live, so it has to be commented out.
+                    val base = trailingBase
+                    if (base.trimStart().startsWith(kws.eval)) {
+                        base.trimEnd()
+                    } else {
+                        base.indentation + kws.eval + " " + base.substring(base.indentation.length)
+                    }
+                } else if (isElseBranch) {
+                    caseMatched = true
+                    code.trimEnd() + " " + kws.caseBranch + " " + condition
                 } else {
                     val matches = try {
                         condition.evalExpr()

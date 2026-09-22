@@ -451,6 +451,40 @@ class PreprocessorTests : FunSpec({
                 val out = "//#case\nclass C {\n    int a = 1; //?t\n}\n//#endcase".convert()
                 out.lines().map { it.trim() }.any { it.startsWith("int a = 1;") } shouldBe true
             }
+            test("trailing //?else is the default branch of a case group") {
+                val out = """
+                    //#case
+                    class C {
+                        int a = 1; //?f
+                        int b = 2; //?else
+                    }
+                    //#endcase
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.any { it.startsWith("int b = 2;") } shouldBe true
+                outLines.none { it.startsWith("int a = 1;") } shouldBe true
+            }
+            test("trailing //?else is skipped once an earlier alternative won") {
+                val out = """
+                    //#case
+                    class C {
+                        int a = 1; //?t
+                        int b = 2; //?else
+                    }
+                    //#endcase
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.any { it.startsWith("int a = 1;") } shouldBe true
+                outLines.none { it.startsWith("int b = 2;") } shouldBe true
+            }
+            test("trailing //?else with content or outside a case group is rejected") {
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "//#case\nclass C {\n    int b = 2; //?else int c = 3;\n}\n//#endcase".convert()
+                }
+                shouldThrow<CommentPreprocessor.ParserException> {
+                    "class C {\n    int b = 2; //?else\n}".convert()
+                }
+            }
             test("throws when no branch in a case group matches (trailing form)") {
                 shouldThrow<CommentPreprocessor.ParserException> {
                     """
