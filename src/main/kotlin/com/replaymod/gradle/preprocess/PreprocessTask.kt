@@ -1235,7 +1235,11 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                         val content = directive.substring(ELSE_BRANCH.length).trim()
                         if (active) {
                             caseMatched = true
-                            if (content.isEmpty()) "" else line.indentation + content
+                            if (content.isEmpty()) {
+                                ""
+                            } else {
+                                line.indentation + content.trimEnd() + " " + kws.caseBranch + " " + ELSE_BRANCH
+                            }
                         } else {
                             line
                         }
@@ -1251,7 +1255,17 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                         }
                         if (matches && active) {
                             if (inCase) caseMatched = true
-                            if (split.second.isEmpty()) "" else line.indentation + split.second
+                            // The winning alternative keeps its directive, rewritten into the trailing form, so
+                            // the code stays live while the condition stays on the line. Dropping the directive
+                            // left a bare statement that the *next* pass - and every version downstream, which
+                            // inherits this text as its source - could no longer recognise as this group's winner.
+                            // It restarted the group with no branch matched, and the first alternative to hold for
+                            // that version took over, so a losing branch came back as live code.
+                            if (split.second.isEmpty()) {
+                                ""
+                            } else {
+                                line.indentation + split.second.trimEnd() + " " + kws.caseBranch + " " + split.first.trim()
+                            }
                         } else {
                             line
                         }

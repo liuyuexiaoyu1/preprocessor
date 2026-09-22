@@ -295,7 +295,7 @@ class PreprocessorTests : FunSpec({
                         int x = /*#case*/0/*?two >= 3 ? 3*//*?one >= 1 ? 1*/;
                     }
                 """.convert()
-                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("int x = 1;") } shouldBe true
             }
             test("inline case keeps the baseline when no condition holds") {
                 val out = """
@@ -346,7 +346,7 @@ class PreprocessorTests : FunSpec({
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
-                outLines.contains("codeA();") shouldBe true
+                outLines.any { it.startsWith("codeA();") } shouldBe true
                 outLines.contains("//?f ? codeB();") shouldBe true
             }
             test("throws when no branch in a case group matches") {
@@ -366,7 +366,7 @@ class PreprocessorTests : FunSpec({
                     //#endcase
                     class C {}
                 """.convert()
-                out.lines().map { it.trim() }.contains("codeA();") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("codeA();") } shouldBe true
             }
             test("throws on malformed replace") {
                 shouldThrow<CommentPreprocessor.ParserException> {
@@ -477,6 +477,53 @@ class PreprocessorTests : FunSpec({
                 outLines.any { it.startsWith("int a = 1;") } shouldBe true
                 outLines.none { it.startsWith("int b = 2;") } shouldBe true
             }
+            context("a //#case group survives the inheritance chain") {
+                fun convert(text: String, mc: Int) = with(CommentPreprocessor(mapOf("MC" to mc))) {
+                    convertSource(
+                        PreprocessTask.DEFAULT_KEYWORDS,
+                        text.lines(),
+                        text.lines().map { it to emptyList() },
+                        "test.java"
+                    ).joinToString("\n")
+                }
+                val source = """
+                    //#case
+                    //? MC >= 26000 ? @A(method = "lambda")
+                    //? MC >= 12111 ? @B(method = "method_33280")
+                    @C(method = "method_33280") //?else
+                    //#endcase
+                    class D {}
+                """.trimIndent()
+
+                test("a line-level winner suppresses a later trailing //?else") {
+                    val outLines = convert(source, 12111).lines().map { it.trim() }
+                    outLines.any { it.startsWith("@B(") } shouldBe true
+                    outLines.none { it.startsWith("@C(") } shouldBe true
+                }
+                test("the winning alternative keeps its directive") {
+                    val outLines = convert(source, 12111).lines().map { it.trim() }
+                    // Without this the next pass cannot tell that the group was already decided, and the
+                    // trailing default branch comes back as live code.
+                    outLines.any { it.startsWith("@B(") && it.endsWith("//? MC >= 12111") } shouldBe true
+                }
+                test("the product stays a fixed point") {
+                    val once = convert(source, 12111)
+                    convert(once, 12111) shouldBe once
+                }
+                test("a later version switches the group to its own alternative") {
+                    // This is the actual failure: the product of one version is the *source* of the next, so
+                    // the group has to be able to hand over to a different branch.
+                    val outLines = convert(convert(source, 12111), 26000).lines().map { it.trim() }
+                    outLines.any { it.startsWith("@A(") } shouldBe true
+                    outLines.none { it.startsWith("@B(") } shouldBe true
+                    outLines.none { it.startsWith("@C(") } shouldBe true
+                }
+                test("a trailing //?else still wins when every line-level branch failed") {
+                    val outLines = convert(source, 12108).lines().map { it.trim() }
+                    outLines.any { it.startsWith("@C(") } shouldBe true
+                    outLines.none { it.startsWith("@B(") } shouldBe true
+                }
+            }
             test("trailing //?else with content or outside a case group is rejected") {
                 shouldThrow<CommentPreprocessor.ParserException> {
                     "//#case\nclass C {\n    int b = 2; //?else int c = 3;\n}\n//#endcase".convert()
@@ -511,7 +558,7 @@ class PreprocessorTests : FunSpec({
             }
             test("standalone line-level //? acts like a single-line //#if") {
                 val out = "//?t ? codeA();\nclass C {}".convert()
-                out.lines().map { it.trim() }.contains("codeA();") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("codeA();") } shouldBe true
                 val out2 = "//?f ? codeA();\nclass C {}".convert()
                 out2.lines().map { it.trim() }.contains("//?f ? codeA();") shouldBe true
             }
@@ -537,7 +584,7 @@ class PreprocessorTests : FunSpec({
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
-                outLines.contains("codeA();") shouldBe true
+                outLines.any { it.startsWith("codeA();") } shouldBe true
                 outLines.contains("//?t ? codeB();") shouldBe true
                 outLines.none { it == "codeB();" } shouldBe true
             }
@@ -550,7 +597,7 @@ class PreprocessorTests : FunSpec({
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
-                outLines.contains("codeA();") shouldBe true
+                outLines.any { it.startsWith("codeA();") } shouldBe true
                 outLines.contains("//?bogus >= 1 ? codeB();") shouldBe true
             }
             test("standalone //? inside an inactive //#if branch stays commented") {
@@ -570,7 +617,7 @@ class PreprocessorTests : FunSpec({
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
-                outLines.contains("codeB();") shouldBe true
+                outLines.any { it.startsWith("codeB();") } shouldBe true
                 outLines.none { it.contains("//?t") } shouldBe true
             }
             test("//#elif is an alias for //#elseif") {
@@ -583,7 +630,7 @@ class PreprocessorTests : FunSpec({
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
                 outLines.contains("//$$ codeA();") shouldBe true
-                outLines.contains("codeB();") shouldBe true
+                outLines.any { it.startsWith("codeB();") } shouldBe true
             }
             test("ifdef activates when the variable is present") {
                 val out = """
@@ -592,7 +639,7 @@ class PreprocessorTests : FunSpec({
                     //#endif
                     class C {}
                 """.convert()
-                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("int x = 1;") } shouldBe true
             }
             test("ifdef deactivates when the variable is absent") {
                 val out = """
@@ -610,7 +657,7 @@ class PreprocessorTests : FunSpec({
                     //#endif
                     class C {}
                 """.convert()
-                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("int x = 1;") } shouldBe true
             }
             test("ifndef deactivates when the variable is present") {
                 val out = """
@@ -654,7 +701,7 @@ class PreprocessorTests : FunSpec({
                     //#endcase
                     class C {}
                 """.convert()
-                out.lines().map { it.trim() }.contains("codeB();") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("codeB();") } shouldBe true
             }
             test("an else branch is skipped when an earlier branch matched") {
                 val out = """
@@ -665,7 +712,7 @@ class PreprocessorTests : FunSpec({
                     class C {}
                 """.convert()
                 val outLines = out.lines().map { it.trim() }
-                outLines.contains("codeA();") shouldBe true
+                outLines.any { it.startsWith("codeA();") } shouldBe true
                 outLines.contains("codeB();") shouldBe false
             }
             test("an else branch satisfies the must-match check") {
@@ -700,7 +747,7 @@ class PreprocessorTests : FunSpec({
                     //#define NEW_API MC >= 12102
                     class C {}
                 """.convert()
-                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("int x = 1;") } shouldBe true
             }
             test("a define alias may carry a compound condition") {
                 val out = """
@@ -708,7 +755,7 @@ class PreprocessorTests : FunSpec({
                     //?NEW_API ? int x = 1;
                     class C {}
                 """.convert()
-                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("int x = 1;") } shouldBe true
             }
             test("define aliases may refer to each other") {
                 val out = """
@@ -717,7 +764,7 @@ class PreprocessorTests : FunSpec({
                     //?NEW_API ? int x = 1;
                     class C {}
                 """.convert()
-                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("int x = 1;") } shouldBe true
             }
             test("a define alias works as an //#if condition") {
                 val out = """
@@ -727,7 +774,7 @@ class PreprocessorTests : FunSpec({
                     //#endif
                     class C {}
                 """.convert()
-                out.lines().map { it.trim() }.contains("int x = 1;") shouldBe true
+                out.lines().map { it.trim() }.any { it.startsWith("int x = 1;") } shouldBe true
             }
             test("throws on a duplicate define with a different condition") {
                 shouldThrow<CommentPreprocessor.ParserException> {
