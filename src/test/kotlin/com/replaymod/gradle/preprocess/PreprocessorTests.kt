@@ -800,6 +800,14 @@ class PreprocessorTests : FunSpec({
                 reverted.lines().map { it.trim() }.none { it.startsWith("int a = 2;") } shouldBe true
                 // Applying it again on a version that already matched reproduces the text unchanged.
                 convert(applied, 12002) shouldBe applied
+                // A bare condition (no leading `MC`) has to be expanded before it is negated, otherwise the
+                // flip writes a condition whose only operator has no left hand side and the next pass cannot
+                // parse it at all.
+                val bare = convert("class C {\n    int a = 1; //#replace <= 12002 ? int a = 2;\n}", 12002)
+                bare.lines().map { it.trim() }.any {
+                    it.startsWith("int a = 2;") && it.contains("//#replace !(MC <= 12002) ? int a = 1;")
+                } shouldBe true
+                convert(bare, 12004).lines().map { it.trim() }.any { it.startsWith("int a = 1;") } shouldBe true
             }
             test("an empty replacement keeps the line when the condition fails") {
                 val out = "class C {\n    int x = 1; //#replace f ?\n}".convert()

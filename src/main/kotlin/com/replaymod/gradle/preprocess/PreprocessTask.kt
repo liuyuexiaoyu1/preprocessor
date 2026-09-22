@@ -1603,11 +1603,20 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
      */
     private fun negateCondition(condition: String): String {
         val trimmed = condition.trim()
-        return if (trimmed.startsWith("!(") && trimmed.endsWith(")")) {
-            trimmed.substring(2, trimmed.length - 1)
-        } else {
-            "!($trimmed)"
+        if (trimmed.startsWith("!(") && trimmed.endsWith(")")) {
+            // Produced by an earlier flip: unwrap rather than wrap again, or the line would grow a `!()`
+            // layer on every hop and never settle.
+            return trimmed.substring(2, trimmed.length - 1)
         }
+        // Expand a bare condition (`<= 1.21`) before negating. The shorthand expansion keys off the first
+        // character, so a leading `!` would hide it and the negated condition would fail to parse on the pass
+        // that has to evaluate it.
+        val expanded = try {
+            expandShorthand(trimmed)
+        } catch (e: Exception) {
+            trimmed
+        }
+        return "!($expanded)"
     }
 
     /**
