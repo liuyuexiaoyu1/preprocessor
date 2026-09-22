@@ -477,6 +477,7 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                     null
                 }
             }?.toTypedArray()
+            val timingStart = System.nanoTime()
             val sources = mutableMapOf<String, String>()
             val processedSources = mutableMapOf<String, String>()
             sourceFiles.forEach { (relPath, inBase, _, _) ->
@@ -501,6 +502,11 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                     }
                 }
             }
+            val timingPassA = System.nanoTime()
+            LOGGER.info(
+                "preprocess pass A: {} ms for {} sources",
+                (timingPassA - timingStart) / 1_000_000, processedSources.size,
+            )
             val overwritesFiles = entries
                 .mapNotNull { it.overwrites }
                 .flatMap { base -> base.walk().filter { it.isFile }.map { Pair(base.toPath(), it) } }
@@ -516,10 +522,13 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
             // out, so a directive written to steer remapping could never do its job. Hand it the preprocessed
             // text on both sides.
             mappedSources = javaTransformer.remap(processedSources, processedSources)
+            val timingRemap = System.nanoTime()
+            LOGGER.info("preprocess remap: {} ms", (timingRemap - timingPassA) / 1_000_000)
         }
 
         entries.forEach { it.generated.deleteRecursively() }
 
+        val timingPassB = System.nanoTime()
         val commentPreprocessor = CommentPreprocessor(vars.get())
         sourceFiles.forEach { (relPath, inBase, outBase, overwritesPath) ->
             val file = inBase.resolve(relPath).toFile()
@@ -545,6 +554,8 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                 file.copyTo(outFile)
             }
         }
+
+        LOGGER.info("preprocess pass B: {} ms", (System.nanoTime() - timingPassB) / 1_000_000)
 
         if (commentPreprocessor.fail) {
             throw GradleException("Failed to remap sources. See errors above for details.")
@@ -1125,6 +1136,14 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             val (line, errors) = lineMapped
             var ignoreErrors = false
             n++
+            // Fast path. A line carrying no directive marker cannot be reached by any branch below while the
+            // enclosing segment is active and remapping is on: it is emitted exactly as the remapper produced
+            // it and it changes no state that later lines depend on. `trim()`, the ~30 `startsWith` probes and
+            // the trailing-directive search are the entire per-line cost, and directives are a small minority
+            // of the lines in a real codebase, so this is where the bulk of the time goes.
+            if (active && remapActive && !inBlockComment && errors.isEmpty() && !hasDirectiveMarker(line)) {
+                return@map line
+            }
             val trimmed = line.trim()
             // A line carrying a *trailing* `//?` is kept out of the remapper entirely and emitted as plain source
             // text. Such a line changes shape between passes, and the remapper re-attaches comments to whatever
@@ -1730,6 +1749,16 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
      * with a directive is a block directive (`//#replace` / `//#case` branch) and is handled on its own,
      * so only a directive preceded by actual code counts as trailing.
      */
+    /**
+     * Whether a line could carry a directive under any keyword set. This is a cheap substring probe over the
+     * fixed markers rather than a walk over [Keywords], because it runs once per source line: a false positive
+     * only means the line takes the normal path, so the markers may safely overlap.
+     */
+    private fun hasDirectiveMarker(line: String): Boolean =
+        line.contains("//#") || line.contains("//?") || line.contains("//$") ||
+            line.contains("/*#") || line.contains("/*?") || line.contains("/*$") ||
+            line.contains("$$*") || line.contains("##") || line.contains("#$$")
+
     private fun trailingDirectiveAt(line: String, kws: Keywords): Int {
         val at = listOf(line.indexOf(kws.replace), line.indexOf(kws.caseBranch)).filter { it > 0 }.minOrNull()
             ?: return -1
