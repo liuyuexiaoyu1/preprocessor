@@ -506,7 +506,12 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                     processedSources[relPath.toString()] = file.readText()
                 }
             }
-            mappedSources = javaTransformer.remap(sources, processedSources)
+            // The remapper parses whatever text it is handed as its PSI basis (it writes `sources` into a
+            // temporary source root and reads it back), and only uses `processedSources` for the text it
+            // emits. Passing the raw files therefore let it see code that a `//#replace` had already swapped
+            // out, so a directive written to steer remapping could never do its job. Hand it the preprocessed
+            // text on both sides.
+            mappedSources = javaTransformer.remap(processedSources, processedSources)
         }
 
         entries.forEach { it.generated.deleteRecursively() }
