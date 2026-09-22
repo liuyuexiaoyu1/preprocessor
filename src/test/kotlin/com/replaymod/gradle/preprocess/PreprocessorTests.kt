@@ -772,8 +772,34 @@ class PreprocessorTests : FunSpec({
                 val out = "class C {\n    int x = 1; //#replace t ?\n}".convert()
                 val outLines = out.lines().map { it.trim() }
                 outLines.none { it.startsWith("int x = 1;") } shouldBe true
-                // The directive survives even an empty replacement, so a later version can re-evaluate it.
-                outLines.any { it.startsWith("//#replace t ?") } shouldBe true
+                // The directive survives, flipped, so a later version can put the line back.
+                outLines.any { it.startsWith("//#replace !(t) ? int x = 1;") } shouldBe true
+            }
+            test("a flipped replacement switches back on a version where the condition fails") {
+                val source = "class C {\n    int a = 1; //#replace MC <= 12002 ? int a = 2;\n}"
+                fun convert(text: String, mc: Int) = with(CommentPreprocessor(mapOf("MC" to mc))) {
+                    convertSource(
+                        PreprocessTask.DEFAULT_KEYWORDS,
+                        text.lines(),
+                        text.lines().map { it to emptyList() },
+                        "test.java"
+                    ).joinToString("\n")
+                }
+                // The version the directive was written for applies it and flips the condition.
+                val applied = convert(source, 12002)
+                applied.lines().map { it.trim() }.any {
+                    it.startsWith("int a = 2;") && it.contains("//#replace !(MC <= 12002) ? int a = 1;")
+                } shouldBe true
+                // A later version inherits that text, the negated condition now holds there, and the original
+                // line has to come back - which is the whole point of keeping it. The unwrapping in
+                // negateCondition is what stops the condition nesting a `!()` deeper on every hop.
+                val reverted = convert(applied, 12004)
+                reverted.lines().map { it.trim() }.any {
+                    it.startsWith("int a = 1;") && it.contains("//#replace MC <= 12002 ? int a = 2;")
+                } shouldBe true
+                reverted.lines().map { it.trim() }.none { it.startsWith("int a = 2;") } shouldBe true
+                // Applying it again on a version that already matched reproduces the text unchanged.
+                convert(applied, 12002) shouldBe applied
             }
             test("an empty replacement keeps the line when the condition fails") {
                 val out = "class C {\n    int x = 1; //#replace f ?\n}".convert()

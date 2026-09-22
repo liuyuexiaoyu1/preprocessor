@@ -1391,21 +1391,23 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 if (matches) {
                     val indent = line.indentation
                     val replacement = split.second
-                    // Keep the directive on the line even once it has been applied. A version further down the
-                    // inheritance chain inherits this text and may evaluate the same condition differently, so it
-                    // still needs the candidate; dropping it here left that version with no way back. Re-running a
-                    // pass reproduces the line identically, so this is a fixed point.
-                    val suffix = " " + kws.replace + " " + directive
+                    // Flip the directive instead of dropping it. The version that matched keeps the replaced
+                    // code, and every version further down the inheritance chain re-evaluates the negated
+                    // condition - which fails there - and switches back to the original. Appending the directive
+                    // unchanged would have re-applied the same replacement while losing the original text, and
+                    // dropping the directive left the next version with no way to reconsider at all.
+                    val flipped = " " + kws.replace + " " + negateCondition(split.first) + " ? " + base.trim()
                     when {
                         // An empty replacement deletes the whole line. It stays in place as an empty line, so the
                         // remapper's line-for-line view is unaffected and the file remains valid.
-                        replacement.isEmpty() -> kws.replace + " " + directive
+                        replacement.isEmpty() ->
+                            kws.replace + " " + negateCondition(split.first) + " ? " + base.trim()
                         base.trimStart().startsWith("import ") -> if (replacement.startsWith("import ")) {
-                            indent + replacement.trimEnd() + suffix
+                            indent + replacement.trimEnd() + flipped
                         } else {
-                            indent + "import " + replacement.removeSuffix(";") + ";" + suffix
+                            indent + "import " + replacement.removeSuffix(";") + ";" + flipped
                         }
-                        else -> indent + replacement + suffix
+                        else -> indent + replacement + flipped
                     }
                 } else {
                     // Keep the directive. A version in the middle of the inheritance chain evaluates the
@@ -1592,6 +1594,20 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             i++
         }
         return null
+    }
+
+    /**
+     * Negates a condition for a flipped `//#replace`. A condition produced by an earlier flip is already a
+     * parenthesised negation, so it is unwrapped rather than wrapped again - otherwise the line would grow a
+     * `!()` layer every time it travelled to another version and would never settle.
+     */
+    private fun negateCondition(condition: String): String {
+        val trimmed = condition.trim()
+        return if (trimmed.startsWith("!(") && trimmed.endsWith(")")) {
+            trimmed.substring(2, trimmed.length - 1)
+        } else {
+            "!($trimmed)"
+        }
     }
 
     /**
