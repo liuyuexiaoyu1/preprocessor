@@ -61,7 +61,7 @@ repositories {
 dependencies {
     implementation(gradleApi())
     implementation(localGroovy())
-    implementation("com.github.liuyuexiaoyu1:remap:5913660") {
+    implementation("com.github.liuyuexiaoyu1:remap:1d797e8") {
         exclude("org.jetbrains.kotlin", "kotlin-compiler-embeddable")
     }
     implementation("net.fabricmc:mapping-io:0.6.1")

@@ -33,6 +33,9 @@ import java.lang.ref.SoftReference
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
+import java.util.Comparator
+import java.util.concurrent.CompletableFuture
 import java.util.function.Consumer
 import java.util.regex.Pattern
 import javax.inject.Inject
@@ -312,8 +315,13 @@ internal abstract class PreprocessAction : WorkAction<PreprocessParameters> {
 
         val cacheKey = fullClasspath.map { it.toString() }
         val classLoader = synchronized(cache) {
-            cache.values.removeIf { it.get() == null }
-            cache[cacheKey]?.get() ?: IsolatedClassLoader(
+            // Held strongly on purpose. A soft reference is collected under memory pressure, and rebuilding this
+            // loader means reloading the whole Kotlin compiler and the remapper - tens of seconds per version
+            // node. Entries are keyed by classpath, which for a chain like this is effectively one value, so the
+            // retained set does not grow.
+            cache[cacheKey]?.also {
+                LOGGER.info("preprocess: reusing the compiler classloader")
+            } ?: IsolatedClassLoader(
                 fullClasspath.toTypedArray(),
                 javaClass.classLoader,
                 exclusions = listOf(
@@ -325,7 +333,10 @@ internal abstract class PreprocessAction : WorkAction<PreprocessParameters> {
                     PreprocessParameters::class.java.name,
                     Keywords::class.java.name,
                 ),
-            ).also { cache[cacheKey] = SoftReference(it) }
+            ).also {
+                LOGGER.info("preprocess: built a new compiler classloader")
+                cache[cacheKey] = it
+            }
         }
 
         val implClass = classLoader.loadClass(PreprocessActionImpl::class.java.name)
@@ -336,13 +347,29 @@ internal abstract class PreprocessAction : WorkAction<PreprocessParameters> {
     }
 
     companion object {
-        private val cache = mutableMapOf<List<String>, SoftReference<IsolatedClassLoader>>()
+        private val cache = mutableMapOf<List<String>, IsolatedClassLoader>()
     }
 }
+
+/**
+ * Bumped whenever the remap output for the same inputs can legitimately change, so that a plugin upgrade does
+ * not silently reuse output produced by an older implementation.
+ */
+private const val REMAP_CACHE_FORMAT = "remap-cache-v2"
+
+// The same entry shape is needed both by the pass that writes the files and by the cleanup that compares the
+// outputs a run expects to produce against what is already on disk.
+private data class SourceEntry(
+    val relPath: String,
+    val inBase: Path,
+    val outBase: Path,
+    val overwritesBase: Path?,
+)
 
 private class PreprocessActionImpl : Consumer<PreprocessParameters> {
     override fun accept(params: PreprocessParameters) {
         val logger = LOGGER
+        val timingStart = System.nanoTime()
         val entries = params.entries.get().map { PreprocessTask.InOut(it.source.get(), it.generated.get(), it.overwrites.orNull) }
         val sourceMappings = params.sourceMappings.orNull
         val destinationMappings = params.destinationMappings.orNull
@@ -359,15 +386,14 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
         val patternAnnotation = params.patternAnnotation
         val manageImports = params.manageImports
 
-        data class Entry(val relPath: String, val inBase: Path, val outBase: Path, val overwritesBase: Path?)
-        val sourceFiles: List<Entry> = entries.flatMap { inOut ->
+        val sourceFiles: List<SourceEntry> = entries.flatMap { inOut ->
             val outBasePath = inOut.generated.toPath()
             val overwritesBasePath = inOut.overwrites?.toPath()
             inOut.source.flatMap { inBase ->
                 val inBasePath = inBase.toPath()
                 inBase.walk().filter { it.isFile }.map { file ->
                     val relPath = inBasePath.relativize(file.toPath())
-                    Entry(relPath.toString(), inBasePath, outBasePath, overwritesBasePath)
+                    SourceEntry(relPath.toString(), inBasePath, outBasePath, overwritesBasePath)
                 }
             }
         }
@@ -387,8 +413,13 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
         val destinationMappingsFile = destinationMappings
         val mappings = if (intermediateMappingsName.isPresent && classpath != null && sourceMappingsFile != null && destinationMappingsFile != null) {
             val sharedMappingsNamespace = intermediateMappingsName.get()
-            val srcTree = MemoryMappingTree().also { readMappings(sourceMappingsFile.toPath(), it) }
-            val dstTree = MemoryMappingTree().also { readMappings(destinationMappingsFile.toPath(), it) }
+            // The two mapping files are independent and parsing them is the bulk of this stage, so read them
+            // concurrently: one here, one on the common pool.
+            val srcTree = MemoryMappingTree()
+            val dstTree = MemoryMappingTree()
+            val srcRead = CompletableFuture.runAsync { readMappings(sourceMappingsFile.toPath(), srcTree) }
+            readMappings(destinationMappingsFile.toPath(), dstTree)
+            srcRead.join()
             if (strictExtraMappings.get()) {
                 if (sharedMappingsNamespace == "srg") {
                     inferSharedClassMappings(srcTree, dstTree, sharedMappingsNamespace)
@@ -413,8 +444,12 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                 val mrgTree = mergeMappings(srcTree, dstTree, extTree, sharedMappingsNamespace)
                 TinyReader(mrgTree, "source", "destination").read()
             } else {
-                val sourceMappings = TinyReader(srcTree, "named", sharedMappingsNamespace).read()
+                // Likewise independent of each other, and the trees are only read from here on.
+                val sourceMappingsFuture = CompletableFuture.supplyAsync {
+                    TinyReader(srcTree, "named", sharedMappingsNamespace).read()
+                }
                 val destinationMappings = TinyReader(dstTree, "named", sharedMappingsNamespace).read()
+                val sourceMappings = sourceMappingsFuture.join()
                 if (mapping != null) {
                     val legacyMap = LegacyMapping.readMappingSet(mapping.toPath(), reverseMapping)
                     val clsMap = legacyMap.splitOffClassMappings()
@@ -450,6 +485,13 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
         } else {
             null
         }
+        val timingMappings = System.nanoTime()
+        LOGGER.info("preprocess mappings: {} ms", (timingMappings - timingStart) / 1_000_000)
+
+        // Declared outside the mapping branch so pass B can reuse the text pass A already read; every version node
+        // would otherwise open and scan all sources a second time.
+        val sources = mutableMapOf<String, String>()
+
         if (mappings != null) {
             classpath!!
             val javaTransformer = Transformer(mappings)
@@ -477,56 +519,95 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                     null
                 }
             }?.toTypedArray()
-            val timingStart = System.nanoTime()
-            val sources = mutableMapOf<String, String>()
-            val processedSources = mutableMapOf<String, String>()
+            // Per-file rewrite cache. Each file's rewrite is independent, so a file whose inputs are unchanged
+            // since the last run reuses its previous output instead of going through the mapping again. The key
+            // has to name everything the output depends on - the source text is folded in per file by the
+            // transformer, and the rest is collected here. Sizes stand in for content because loom rewrites
+            // mapping files in place: their timestamps move while their content does not.
+            entries.firstOrNull()?.generated?.parentFile?.let { buildDir ->
+                val key = mutableListOf<String?>()
+                key += REMAP_CACHE_FORMAT
+                key += sourceMappings?.absolutePath
+                key += sourceMappings?.length()?.toString()
+                key += destinationMappings?.absolutePath
+                key += destinationMappings?.length()?.toString()
+                key += mapping?.absolutePath
+                key += mapping?.length()?.toString()
+                key += intermediateMappingsName.orNull
+                key += strictExtraMappings.get().toString()
+                key += patternAnnotation.orNull
+                key += manageImports.getOrElse(false).toString()
+                key += jdkHome.orNull?.asFile?.absolutePath
+                key += remappedjdkHome.orNull?.asFile?.absolutePath
+                // The classpaths drive PSI resolution, so a changed dependency set must not reuse old output.
+                javaTransformer.classpath.orEmpty().sorted().forEach { key += it; key += java.io.File(it).length().toString() }
+                javaTransformer.remappedClasspath.orEmpty().sorted().forEach { key += it; key += java.io.File(it).length().toString() }
+                javaTransformer.remappedFileCacheDir = java.io.File(buildDir, "remap-cache")
+                javaTransformer.remappedFileCacheKey = key.joinToString("|")
+            }
+            LOGGER.info(
+                "preprocess transformer init: {} ms",
+                (System.nanoTime() - timingMappings) / 1_000_000,
+            )
+            // Reading the sources is kept separate from the pass that feeds the remapper. The transformer decides
+            // from the file contents alone whether it can replay a previous result, and that decision must not
+            // depend on the preprocessing work being done - a full cache hit never needs it.
             sourceFiles.forEach { (relPath, inBase, _, _) ->
                 if (relPath.endsWith(".java") || relPath.endsWith(".kt")) {
-                    val text = String(Files.readAllBytes(inBase.resolve(relPath)))
-                    sources[relPath] = text
-                    val lines = text.lines()
-                    val kws = keywords.get().entries.find { (ext, _) -> relPath.endsWith(ext) }
-                    if (kws != null) {
-                        val preprocessor = CommentPreprocessor(vars.get())
-                        processedSources[relPath] = preprocessor.hideCandidateAnnotations(
-                            preprocessor.convertSource(
-                                kws.value,
-                                lines,
-                                lines.map { Pair(it, emptyList()) },
-                                relPath,
-                                // This pass feeds the remapper, so it must stay parseable: no `eval` prefixes.
-                                finalPass = false,
-                            ).joinToString("\n"),
-                            kws.value,
-                        )
-                    }
+                    sources[relPath] = String(Files.readAllBytes(inBase.resolve(relPath)))
                 }
             }
-            val timingPassA = System.nanoTime()
-            LOGGER.info(
-                "preprocess pass A: {} ms for {} sources",
-                (timingPassA - timingStart) / 1_000_000, processedSources.size,
-            )
-            val overwritesFiles = entries
-                .mapNotNull { it.overwrites }
-                .flatMap { base -> base.walk().filter { it.isFile }.map { Pair(base.toPath(), it) } }
-            overwritesFiles.forEach { (base, file) ->
-                if (file.name.endsWith(".java") || file.name.endsWith(".kt")) {
-                    val relPath = base.relativize(file.toPath())
-                    processedSources[relPath.toString()] = file.readText()
-                }
-            }
+            val timingSourcesRead = System.nanoTime()
             // The remapper parses whatever text it is handed as its PSI basis (it writes `sources` into a
             // temporary source root and reads it back), and only uses `processedSources` for the text it
             // emits. Passing the raw files therefore let it see code that a `//#replace` had already swapped
             // out, so a directive written to steer remapping could never do its job. Hand it the preprocessed
             // text on both sides.
-            mappedSources = javaTransformer.remap(processedSources, processedSources)
+            // Cross-file inputs are handled by the transformer itself, which folds each file's `@Mixin` targets
+            // into that file's own cache entry; the key here carries only the settings that apply to every file.
+            mappedSources = javaTransformer.remapOnDemand(sources) {
+                val processedSources = mutableMapOf<String, String>()
+                sourceFiles.forEach { (relPath, inBase, _, _) ->
+                    if (relPath.endsWith(".java") || relPath.endsWith(".kt")) {
+                        val lines = sources.getValue(relPath).lines()
+                        val kws = keywords.get().entries.find { (ext, _) -> relPath.endsWith(ext) }
+                        if (kws != null) {
+                            val preprocessor = CommentPreprocessor(vars.get())
+                            processedSources[relPath] = preprocessor.hideCandidateAnnotations(
+                                preprocessor.convertSource(
+                                    kws.value,
+                                    lines,
+                                    lines.map { Pair(it, emptyList()) },
+                                    relPath,
+                                    // This pass feeds the remapper, so it must stay parseable: no `eval` prefixes.
+                                    finalPass = false,
+                                ).joinToString("\n"),
+                                kws.value,
+                            )
+                        }
+                    }
+                }
+                LOGGER.info(
+                    "preprocess pass A: {} ms for {} sources",
+                    (System.nanoTime() - timingSourcesRead) / 1_000_000, processedSources.size,
+                )
+                entries
+                    .mapNotNull { it.overwrites }
+                    .flatMap { base -> base.walk().filter { it.isFile }.map { Pair(base.toPath(), it) } }
+                    .forEach { (base, file) ->
+                        if (file.name.endsWith(".java") || file.name.endsWith(".kt")) {
+                            processedSources[base.relativize(file.toPath()).toString()] = file.readText()
+                        }
+                    }
+                processedSources
+            }
             val timingRemap = System.nanoTime()
-            LOGGER.info("preprocess remap: {} ms", (timingRemap - timingPassA) / 1_000_000)
+            LOGGER.info("preprocess remap: {} ms", (timingRemap - timingSourcesRead) / 1_000_000)
         }
 
-        entries.forEach { it.generated.deleteRecursively() }
+        // Remove only what this run no longer produces, instead of wiping the tree: a full delete makes every
+        // version node rewrite every file even when nothing changed.
+        cleanGeneratedOutputs(entries, sourceFiles)
 
         val timingPassB = System.nanoTime()
         val commentPreprocessor = CommentPreprocessor(vars.get())
@@ -548,10 +629,11 @@ private class PreprocessActionImpl : Consumer<PreprocessParameters> {
                             .mapIndexed { index: Int, line: String -> Pair(line, errorsByLine[index] ?: emptyList<String>()) }
                     } ?: lines.map { Pair(it, emptyList()) }
                 }
-                commentPreprocessor.convertFile(kws.value, file, outFile, javaTransform)
+                // Only touch the output when its content actually changes: rewriting identical bytes bumps the
+                // timestamp and makes the next build see every file as modified.
+                writeBytesIfChanged(outFile, commentPreprocessor.convertFileToText(kws.value, file, javaTransform, sources[relPath]).toByteArray(Charsets.UTF_8))
             } else {
-                outFile.parentFile.mkdirs()
-                file.copyTo(outFile)
+                writeBytesIfChanged(outFile, file.readBytes())
             }
         }
 
@@ -1136,12 +1218,14 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             val (line, errors) = lineMapped
             var ignoreErrors = false
             n++
-            // Fast path. A line carrying no directive marker cannot be reached by any branch below while the
-            // enclosing segment is active and remapping is on: it is emitted exactly as the remapper produced
-            // it and it changes no state that later lines depend on. `trim()`, the ~30 `startsWith` probes and
-            // the trailing-directive search are the entire per-line cost, and directives are a small minority
-            // of the lines in a real codebase, so this is where the bulk of the time goes.
-            if (active && remapActive && !inBlockComment && errors.isEmpty() && !hasDirectiveMarker(line)) {
+            // A line holding neither `/` nor `$` cannot contain a directive under any keyword set, so while the
+            // segment is active and remapping is on it is emitted exactly as the remapper produced it and it
+            // changes no state later lines depend on. Skipping `trim()` and the long `startsWith` chain here is
+            // the point; an earlier attempt using one `contains` per marker was slower than doing nothing,
+            // because that scanned the whole line nine times.
+            if (active && remapActive && !inBlockComment && errors.isEmpty() &&
+                line.indexOf('/') < 0 && line.indexOf('$') < 0
+            ) {
                 return@map line
             }
             val trimmed = line.trim()
@@ -1156,8 +1240,9 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             // just rewritten count as "the caller wrote a trailing directive", and the fallback below then
             // handed the trailing branch the *source* line instead - whose `//?` sits at index 0, so the
             // condition was read as everything after it.
-            val trailingCaseLine =
-                !originalLine.trim().startsWith(kws.caseBranch) && originalLine.indexOf(kws.caseBranch) >= 0
+            val trailingCaseLine = originalLine.indexOf('/') >= 0 &&
+                originalLine.indexOf(kws.caseBranch) >= 0 &&
+                !originalLine.trim().startsWith(kws.caseBranch)
             val mapped = if (inBlockComment) {
                 val endIdx = line.indexOf(kws.blockEnd)
                 if (endIdx >= 0) {
@@ -1418,6 +1503,13 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
 
             val outLine = if (swapAt >= 0 && active) {
                 val base = line.substring(0, swapAt)
+                // The other side of the directive has to carry the code as it was *read*, not as the remapper
+                // left it. This line's own text may already hold the remapper's rewrite and must keep it, but
+                // the alternative travels on to the next version in the chain and is remapped again there - so
+                // feeding it this pass's rewritten text both loses the original and, when the rewrite was a
+                // substitution, collapsed the two sides into the same text.
+                val originalSwapAt = originalLine.indexOf(kws.replace)
+                val flipBase = if (originalSwapAt > 0) originalLine.substring(0, originalSwapAt) else base
                 val directive = line.substring(swapAt + kws.replace.length).trim()
                 val split = splitConditionAndDirective(directive)
                     ?: throw ParserException(
@@ -1436,12 +1528,12 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     // condition - which fails there - and switches back to the original. Appending the directive
                     // unchanged would have re-applied the same replacement while losing the original text, and
                     // dropping the directive left the next version with no way to reconsider at all.
-                    val flipped = " " + kws.replace + " " + negateCondition(split.first) + " ? " + base.trim()
+                    val flipped = " " + kws.replace + " " + negateCondition(split.first) + " ? " + flipBase.trim()
                     when {
                         // An empty replacement deletes the whole line. It stays in place as an empty line, so the
                         // remapper's line-for-line view is unaffected and the file remains valid.
                         replacement.isEmpty() ->
-                            kws.replace + " " + negateCondition(split.first) + " ? " + base.trim()
+                            kws.replace + " " + negateCondition(split.first) + " ? " + flipBase.trim()
                         base.trimStart().startsWith("import ") -> if (replacement.startsWith("import ")) {
                             indent + replacement.trimEnd() + flipped
                         } else {
@@ -1687,19 +1779,43 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
      * Writes an intermediate artifact when the `PREPROCESS_DUMP_DIR` environment variable is set, so the text the
      * remapper received can be compared with the text it produced.
      */
-    private fun dump(name: String, content: String) {
-        val dir = System.getenv("PREPROCESS_DUMP_DIR") ?: return
+    private val dumpDir = System.getenv("PREPROCESS_DUMP_DIR")
+
+    private fun dump(name: String, content: () -> String) {
+        val dir = dumpDir ?: return
         try {
             val file = java.io.File(dir, name)
             file.parentFile?.mkdirs()
-            file.writeText(content)
+            file.writeText(content())
         } catch (e: Exception) {
             System.err.println("preprocess: could not write dump '$name': ${e.message}")
         }
     }
 
-    fun convertFile(kws: Keywords, inFile: File, outFile: File, remap: ((List<String>) -> List<Pair<String, List<String>>>)? = null) {
-        val string = inFile.readText()
+    fun convertFile(
+        kws: Keywords,
+        inFile: File,
+        outFile: File,
+        remap: ((List<String>) -> List<Pair<String, List<String>>>)? = null,
+        sourceText: String? = null,
+    ) {
+        outFile.parentFile.mkdirs()
+        outFile.writeText(convertFileToText(kws, inFile, remap, sourceText))
+    }
+
+    /**
+     * The converted text of [inFile], without writing it anywhere.
+     *
+     * [sourceText] lets the caller hand back text it has already read: the pass feeding the remapper reads every
+     * source to parse its directives, and re-reading it here would open and scan all of them a second time.
+     */
+    fun convertFileToText(
+        kws: Keywords,
+        inFile: File,
+        remap: ((List<String>) -> List<Pair<String, List<String>>>)? = null,
+        sourceText: String? = null,
+    ): String {
+        val string = sourceText ?: inFile.readText()
         var lines = string.lines()
         // The remapper round-trips every line through javaparser, which re-attaches or drops trailing
         // comments. A trailing directive (`//#replace ...` / `//?cond`) therefore never reached
@@ -1726,12 +1842,11 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
         } else {
             remappedRaw
         }
-        dump(inFile.name + ".path.txt", inFile.absolutePath)
-        dump(inFile.name + ".source.txt", string)
-        dump(
-            inFile.name + ".secondpass.txt",
+        dump("${inFile.name}.path.txt") { inFile.absolutePath }
+        dump("${inFile.name}.source.txt") { string }
+        dump("${inFile.name}.secondpass.txt") {
             remappedRaw.mapIndexed { index, pair -> "${index + 1}: ${pair.first}" }.joinToString("\n")
-        )
+        }
         try {
             lines = convertSource(kws, lines, remapped, inFile.path)
         } catch (e: Throwable) {
@@ -1740,8 +1855,7 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
             }
             throw RuntimeException("Failed to convert file $inFile", e)
         }
-        outFile.parentFile.mkdirs()
-        outFile.writeText(lines.joinToString("\n"))
+        return lines.joinToString("\n")
     }
 
     /**
@@ -1749,20 +1863,23 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
      * with a directive is a block directive (`//#replace` / `//#case` branch) and is handled on its own,
      * so only a directive preceded by actual code counts as trailing.
      */
-    /**
-     * Whether a line could carry a directive under any keyword set. This is a cheap substring probe over the
-     * fixed markers rather than a walk over [Keywords], because it runs once per source line: a false positive
-     * only means the line takes the normal path, so the markers may safely overlap.
-     */
-    private fun hasDirectiveMarker(line: String): Boolean =
-        line.contains("//#") || line.contains("//?") || line.contains("//$") ||
-            line.contains("/*#") || line.contains("/*?") || line.contains("/*$") ||
-            line.contains("$$*") || line.contains("##") || line.contains("#$$")
-
     private fun trailingDirectiveAt(line: String, kws: Keywords): Int {
-        val at = listOf(line.indexOf(kws.replace), line.indexOf(kws.caseBranch)).filter { it > 0 }.minOrNull()
-            ?: return -1
-        return if (line.substring(0, at).isBlank()) -1 else at
+        // Cheap rejection first: both directive markers start with '/', so a line without one cannot carry a
+        // directive. Most lines take this branch, which skips two full indexOf scans, a list allocation and a
+        // substring - this runs once for every source line of every version node.
+        if (line.indexOf('/') < 0) return -1
+        val replaceAt = line.indexOf(kws.replace)
+        val caseAt = line.indexOf(kws.caseBranch)
+        val at = when {
+            replaceAt > 0 && (caseAt <= 0 || replaceAt < caseAt) -> replaceAt
+            caseAt > 0 -> caseAt
+            else -> return -1
+        }
+        // Same result as `line.substring(0, at).isBlank()`, without allocating the prefix.
+        for (i in 0 until at) {
+            if (!line[i].isWhitespace()) return at
+        }
+        return -1
     }
 
     data class IfStackEntry(
@@ -1775,6 +1892,68 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
     class InvalidExpressionException(expr: String) : RuntimeException(expr)
 
     class ParserException(str: String) : RuntimeException(str)
+}
+
+/**
+ * Writes [bytes] only when they differ from what is already there. Rewriting identical content bumps the
+ * timestamp of every generated file, which makes an otherwise unchanged version node look dirty to the next build.
+ */
+private fun writeBytesIfChanged(file: File, bytes: ByteArray) {
+    if (file.isFile && file.readBytes().contentEquals(bytes)) {
+        return
+    }
+    if (!file.isFile && file.exists()) {
+        file.deleteRecursively()
+    }
+    file.parentFile.mkdirs()
+    Files.write(
+        file.toPath(),
+        bytes,
+        StandardOpenOption.CREATE,
+        StandardOpenOption.TRUNCATE_EXISTING,
+        StandardOpenOption.WRITE,
+    )
+}
+
+/**
+ * Deletes the files this run is no longer expected to produce, pruning the directories they leave empty, instead
+ * of wiping the whole output tree. A blanket delete forced every file of every node to be rewritten on every run.
+ */
+private fun cleanGeneratedOutputs(entries: List<PreprocessTask.InOut>, sourceFiles: List<SourceEntry>) {
+    val expectedOutputs = entries
+        .associate { it.generated.toPath().toAbsolutePath().normalize() to mutableSetOf<Path>() }
+        .toMutableMap()
+    sourceFiles.forEach { (relPath, _, outBase, overwritesPath) ->
+        if (overwritesPath == null || !Files.exists(overwritesPath.resolve(relPath))) {
+            expectedOutputs.getOrPut(outBase.toAbsolutePath().normalize(), ::mutableSetOf)
+                .add(outBase.resolve(relPath).toAbsolutePath().normalize())
+        }
+    }
+    expectedOutputs.forEach { (generatedBase, expectedFiles) ->
+        val generated = generatedBase.toFile()
+        if (expectedFiles.isEmpty()) {
+            generated.deleteRecursively()
+        } else if (generated.isFile) {
+            generated.delete()
+        } else if (generated.exists()) {
+            Files.walk(generatedBase).use { files ->
+                files.filter { Files.isRegularFile(it) && it !in expectedFiles }
+                    .forEach { Files.deleteIfExists(it) }
+            }
+            Files.walk(generatedBase)
+                .sorted(Comparator.reverseOrder())
+                .use { paths ->
+                    paths.filter { it != generatedBase && Files.isDirectory(it) }
+                        .forEach { directory ->
+                            Files.list(directory).use { children ->
+                                if (!children.findAny().isPresent) {
+                                    Files.deleteIfExists(directory)
+                                }
+                            }
+                        }
+                }
+        }
+    }
 }
 
 private fun <E> MutableList<E>.push(e: E) = add(e)
