@@ -1271,10 +1271,16 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                 // `$$*/` - which, for a single-line block, is never. The directives it swallowed went unread,
                 // and a branch's `//#endif` was among them: the branch then looked unclosed, and the build
                 // stopped with "Missing endif" against a line that was written correctly.
-                inBlockComment = !after.contains(kws.blockEnd)
+                //
+                // Its closing marker is taken off here for the same reason the closing line of a multi-line block
+                // has it taken off: what is handed to the remapper is code, and `int a = 1;$$*/` is not - the
+                // `$$` reads as an identifier and the `*/` after it as nothing at all.
+                val end = after.indexOf(kws.blockEnd)
+                inBlockComment = end < 0
+                val body = if (end < 0) after else after.substring(0, end).trimEnd()
                 when {
-                    active -> if (after.isEmpty()) "" else line.takeWhile { it == ' ' || it == '\t' } + after
-                    !finalPass -> line.indentation + kws.eval + " " + after
+                    active -> if (body.isEmpty()) "" else line.takeWhile { it == ' ' || it == '\t' } + body
+                    !finalPass -> line.indentation + kws.eval + " " + body
                     else -> line
                 }
             } else if (trimmed.startsWith(kws.define)) {

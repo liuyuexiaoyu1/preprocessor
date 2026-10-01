@@ -465,6 +465,9 @@ class PreprocessorTests : FunSpec({
                 val outLines = out.lines().map { it.trim() }
                 outLines.any { it.startsWith("int a = 1;") } shouldBe true
                 outLines.none { it.startsWith("int a = 2;") } shouldBe true
+                // The code the remapper is handed has to be code: the closing marker of a single-line block is
+                // taken off the line it shares, or `$$*/` trails the statement into that pass.
+                outLines.none { it.startsWith("int a = 1;") && it.contains("$$*/") } shouldBe true
             }
             test("trailing case condition keeps the line when it holds") {
                 val out = "//#case\nclass C {\n    int a = 1; //?t\n}\n//#endcase".convert()
