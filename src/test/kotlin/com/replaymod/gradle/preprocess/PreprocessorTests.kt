@@ -447,6 +447,25 @@ class PreprocessorTests : FunSpec({
                     "class C {\n/*$$\nint a = 1;\n".convert()
                 }
             }
+            test("a block that closes on its own line does not swallow the lines after it") {
+                // The block is opened and closed on one line, so the `//#endif` on the next one is a directive
+                // and has to be read as one. Treated as still inside a block, it was skipped, the branch it
+                // closed looked unclosed, and the file failed with "Missing endif" against a line that says
+                // `//#else` - which is where the report came from in the first place.
+                val d = "$" + "$"
+                val out = """
+                    class C {
+                        //#if t
+                        /*${d}int a = 1;${d}*/
+                        //#else
+                        /*${d}int a = 2;${d}*/
+                        //#endif
+                    }
+                """.convert()
+                val outLines = out.lines().map { it.trim() }
+                outLines.any { it.startsWith("int a = 1;") } shouldBe true
+                outLines.none { it.startsWith("int a = 2;") } shouldBe true
+            }
             test("trailing case condition keeps the line when it holds") {
                 val out = "//#case\nclass C {\n    int a = 1; //?t\n}\n//#endcase".convert()
                 out.lines().map { it.trim() }.any { it.startsWith("int a = 1;") } shouldBe true

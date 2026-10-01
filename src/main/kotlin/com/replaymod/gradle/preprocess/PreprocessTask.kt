@@ -1264,8 +1264,14 @@ class CommentPreprocessor(private val vars: Map<String, Int>) {
                     }
                 }
             } else if (trimmed.startsWith(kws.blockStart)) {
-                inBlockComment = true
                 val after = trimmed.substring(kws.blockStart.length).trimStart()
+                // A block that closes on the line it opens leaves nothing open.
+                //
+                // Marking it open regardless swallowed every line after it until the file happened to contain a
+                // `$$*/` - which, for a single-line block, is never. The directives it swallowed went unread,
+                // and a branch's `//#endif` was among them: the branch then looked unclosed, and the build
+                // stopped with "Missing endif" against a line that was written correctly.
+                inBlockComment = !after.contains(kws.blockEnd)
                 when {
                     active -> if (after.isEmpty()) "" else line.takeWhile { it == ' ' || it == '\t' } + after
                     !finalPass -> line.indentation + kws.eval + " " + after
